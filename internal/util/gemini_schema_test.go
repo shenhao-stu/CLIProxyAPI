@@ -1354,6 +1354,161 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaRemovesMaxTokensKeywordPreservesPropertyNames(t *testing.T) {
+	const input = `{"type":"object","maxTokens":512,"properties":{
+		"prompt":{"type":"string","maxTokens":64},
+		"maxTokens":{"type":"string","description":"Caller supplied value"},
+		"properties":{"type":"object","maxTokens":32,"properties":{
+			"maxTokens":{"type":"number","maxTokens":16}}},
+		"entries":{"type":"array","items":{"type":"string","maxTokens":8}},
+		"choice":{"anyOf":[{"type":"string","maxTokens":4},{"type":"null"}]},
+		"a.b*?":{"type":"string","maxTokens":2}
+	},"required":["maxTokens"]}`
+	for name, clean := range map[string]func(string) string{
+		"gemini":              CleanJSONSchemaForGemini,
+		"geminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityGemini":   func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			for _, path := range []string{
+				"maxTokens", "properties.prompt.maxTokens", "properties.properties.maxTokens",
+				"properties.properties.properties.maxTokens.maxTokens",
+				"properties.entries.items.maxTokens", "properties.choice.maxTokens",
+				`properties.a\.b\*\?.maxTokens`,
+			} {
+				if gjson.Get(got, path).Exists() {
+					t.Errorf("unsupported keyword survived at %s: %s", path, got)
+				}
+			}
+			for path, want := range map[string]string{
+				"properties.maxTokens.type":                       "string",
+				"properties.maxTokens.description":                "Caller supplied value",
+				"properties.properties.properties.maxTokens.type": "number",
+				"properties.prompt.type":                          "string",
+				"properties.entries.items.type":                   "string",
+				"properties.choice.type":                          "string",
+				`properties.a\.b\*\?.type`:                        "string",
+				"required.0":                                      "maxTokens",
+			} {
+				if value := gjson.Get(got, path).String(); value != want {
+					t.Errorf("%s = %q, want %q; output=%s", path, value, want, got)
+				}
+			}
+			if again := clean(got); again != got {
+				t.Errorf("cleaning is not idempotent: first=%s second=%s", got, again)
+			}
+			if gjson.Get(input, "properties.prompt.maxTokens").Int() != 64 {
+				t.Fatal("input schema changed")
+			}
+		})
+	}
+}
+
+func TestCleanJSONSchemaMaxTokensInReferencedDefinitions(t *testing.T) {
+	for _, definitions := range []string{"$defs", "definitions"} {
+		input := `{"type":"object","properties":{"value":{"$ref":"#/` + definitions + `/maxTokens"}},"` + definitions + `":{
+			"maxTokens":{"type":"object","maxTokens":8,"properties":{"maxTokens":{"type":"string","maxTokens":4}}}}}`
+		for name, clean := range map[string]func(string) string{
+			"antigravity":         CleanJSONSchemaForAntigravity,
+			"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		} {
+			t.Run(definitions+"/"+name, func(t *testing.T) {
+				got := clean(input)
+				if gjson.Get(got, "properties.value.maxTokens").Exists() ||
+					gjson.Get(got, "properties.value.properties.maxTokens.maxTokens").Exists() {
+					t.Fatalf("referenced extension survived: %s", got)
+				}
+				if gjson.Get(got, "properties.value.properties.maxTokens.type").String() != "string" {
+					t.Fatalf("referenced property was not preserved: %s", got)
+				}
+				if again := clean(got); again != got {
+					t.Fatalf("referenced schema is not idempotent: %s", again)
+				}
+			})
+		}
+	}
+}
+
+func TestCleanJSONSchemaMaxTokensPreservesDefaultAndExamples(t *testing.T) {
+	const input = `{"type":"object","maxTokens":512,"properties":{
+		"maxTokens":{"type":"integer"},
+		"nested":{"type":"object","default":{"maxTokens":16}}},
+		"default":{"maxTokens":42,"nested":{"maxTokens":8}},
+		"examples":[{"maxTokens":24,"nested":{"maxTokens":4}}]}`
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	for _, path := range []string{"default", "examples", "properties.nested.default"} {
+		if !reflect.DeepEqual(gjson.Get(got, path).Value(), gjson.Get(input, path).Value()) {
+			t.Errorf("data changed at %s: %s", path, got)
+		}
+	}
+	if gjson.Get(got, "maxTokens").Exists() || gjson.Get(got, "properties.maxTokens.type").String() != "integer" {
+		t.Fatalf("schema keyword/property boundary broken: %s", got)
+	}
+	if again := CleanJSONSchemaForGeminiJSONSchema(got); again != got {
+		t.Fatalf("cleaning is not idempotent: %s", again)
+	}
+}
+
+func TestNormalizeSchemaMaxTokensDoesNotTraverseData(t *testing.T) {
+	const input = `{"type":"object","maxTokens":512,"properties":{
+		"maxTokens":{"type":"integer","maxTokens":32}},
+		"patternProperties":{"maxTokens":{"type":"string","maxTokens":16}},
+		"default":{"maxTokens":42,"properties":{"maxTokens":8}},
+		"examples":[{"maxTokens":24}],"example":{"maxTokens":12},
+		"const":{"maxTokens":6},"enum":[{"maxTokens":3}],
+		"x-data":{"maxTokens":1}}`
+	for _, wrapped := range []bool{false, true} {
+		payload, prefix := input, ""
+		if wrapped {
+			payload, prefix = `{"schema":`+input+`}`, "schema."
+		}
+		got := normalizeMalformedSchemaObjects(payload, false)
+		for _, key := range []string{"default", "examples", "example", "const", "enum", "x-data"} {
+			path := prefix + key
+			if !reflect.DeepEqual(gjson.Get(got, path).Value(), gjson.Get(payload, path).Value()) {
+				t.Errorf("data changed at %s: %s", path, got)
+			}
+		}
+		for _, key := range []string{"maxTokens", "properties.maxTokens.maxTokens", "patternProperties.maxTokens.maxTokens"} {
+			if gjson.Get(got, prefix+key).Exists() {
+				t.Errorf("schema extension remains at %s: %s", prefix+key, got)
+			}
+		}
+		for key, want := range map[string]string{"properties.maxTokens.type": "integer", "patternProperties.maxTokens.type": "string"} {
+			if gjson.Get(got, prefix+key).String() != want {
+				t.Errorf("schema name changed at %s: %s", prefix+key, got)
+			}
+		}
+		if again := normalizeMalformedSchemaObjects(got, false); again != got {
+			t.Errorf("normalization is not idempotent: %s", again)
+		}
+	}
+}
+
+func TestCleanJSONSchemaMaxTokensBarePropertyName(t *testing.T) {
+	const input = `{"maxTokens":{"type":"integer","maxTokens":32}}`
+	for name, clean := range map[string]func(string) string{
+		"gemini":              CleanJSONSchemaForGemini,
+		"geminiJSONSchema":    CleanJSONSchemaForGeminiJSONSchema,
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			if gjson.Get(got, "properties.maxTokens.type").String() != "integer" ||
+				gjson.Get(got, "properties.maxTokens.maxTokens").Exists() {
+				t.Fatalf("bare parameter confused with schema extension: %s", got)
+			}
+			if again := clean(got); again != got {
+				t.Fatalf("cleaning is not idempotent: %s", again)
+			}
+		})
+	}
+}
+
 func TestCleanJSONSchema_ConditionalKeywords(t *testing.T) {
 	// 1. Root-level if/then/else
 	rootInput := `{

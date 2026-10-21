@@ -339,6 +339,7 @@ func removePlaceholderFields(jsonStr string) string {
 // 1. Bare property maps missing the "type": "object" and "properties": {...} wrappers are wrapped.
 // 2. Boolean "required": true on property definitions are stripped and promoted to the parent's "required" array.
 // 3. Tool array schemas missing "items" receive a string item schema required by Gemini and Antigravity.
+// 4. Non-standard maxTokens extensions are removed only from schema nodes, never data values.
 func normalizeMalformedSchemaObjects(jsonStr string, addMissingArrayItems bool) string {
 	if jsonStr == "" {
 		return jsonStr
@@ -530,6 +531,13 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 			}
 			modified = true
 		}
+	}
+
+	// This traversal visits schema nodes only; default/examples/const/enum contain data.
+	// Normalize bare property maps first so a parameter named maxTokens survives.
+	if _, exists := clone["maxTokens"]; exists {
+		delete(clone, "maxTokens")
+		modified = true
 	}
 
 	// 2. If node has a "properties" map, recursively repair all properties inside it

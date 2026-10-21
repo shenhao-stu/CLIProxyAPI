@@ -406,3 +406,82 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 		}
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAIIncludesReasoningWhenCandidatesMissing(t *testing.T) {
+	var param any
+	chunk := []byte(`{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`)
+
+	result := ConvertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+	if !completionTokens.Exists() || completionTokens.Int() != 42 {
+		t.Fatalf("completion_tokens = %s, want present with value 42. Output: %s", completionTokens.Raw, result[0])
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIUsageMatchesNonStream(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		metadata   string
+		prompt     int64
+		completion int64
+		reasoning  int64
+		cached     int64
+	}{
+		{"text and reasoning", `{"promptTokenCount":7,"candidatesTokenCount":4,"thoughtsTokenCount":111,"totalTokenCount":122,"cachedContentTokenCount":3}`, 7, 115, 111, 3},
+		{"reasoning only", `{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}`, 16, 42, 42, 0},
+		{"reasoning omitted", `{"promptTokenCount":7,"candidatesTokenCount":4,"totalTokenCount":11}`, 7, 4, 0, 0},
+		{"reasoning zero", `{"promptTokenCount":7,"candidatesTokenCount":4,"thoughtsTokenCount":0,"totalTokenCount":11}`, 7, 4, 0, 0},
+		{"no completion", `{"promptTokenCount":7,"totalTokenCount":7}`, 7, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			terminal := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":` + tc.metadata + `}}`)
+			nonStream := ConvertAntigravityResponseToOpenAINonStream(ctx, "model", nil, nil, terminal, nil)
+			for _, mode := range []string{"terminal", "usage only", "filtered until done"} {
+				t.Run(mode, func(t *testing.T) {
+					var param any
+					chunk := terminal
+					if mode == "usage only" {
+						chunk = []byte(`{"response":{"usageMetadata":` + tc.metadata + `}}`)
+					} else if mode == "filtered until done" {
+						chunk = []byte(`{"response":{"cpaUsageMetadata":` + tc.metadata + `}}`)
+					}
+					result := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk, &param)
+					if len(result) != 1 {
+						t.Fatalf("expected 1 result, got %d", len(result))
+					}
+					if mode == "filtered until done" {
+						if usage := gjson.GetBytes(result[0], "usage"); usage.Exists() {
+							t.Fatalf("filtered intermediate usage must remain pending: %s", usage.Raw)
+						}
+						result = ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, []byte("[DONE]"), &param)
+						if len(result) != 1 {
+							t.Fatalf("expected 1 terminal result, got %d", len(result))
+						}
+					}
+					for path, want := range map[string]int64{
+						"usage.prompt_tokens":                              tc.prompt,
+						"usage.completion_tokens":                          tc.completion,
+						"usage.total_tokens":                               tc.prompt + tc.completion,
+						"usage.completion_tokens_details.reasoning_tokens": tc.reasoning,
+						"usage.prompt_tokens_details.cached_tokens":        tc.cached,
+					} {
+						got := gjson.GetBytes(result[0], path)
+						if got.Int() != want {
+							t.Errorf("%s = %s, want %d", path, got.Raw, want)
+						}
+						if expected := gjson.GetBytes(nonStream, path); got.Raw != expected.Raw {
+							t.Errorf("%s stream = %s, nonstream = %s", path, got.Raw, expected.Raw)
+						}
+					}
+					if !gjson.GetBytes(result[0], "usage.completion_tokens").Exists() {
+						t.Error("completion_tokens must be present even when zero")
+					}
+				})
+			}
+		})
+	}
+}

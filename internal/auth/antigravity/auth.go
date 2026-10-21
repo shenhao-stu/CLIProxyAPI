@@ -72,7 +72,7 @@ func (o *AntigravityAuth) shortUserAgent() string {
 	return misc.AntigravityRequestUserAgent("")
 }
 
-func (o *AntigravityAuth) nodeUserAgent() string {
+func (o *AntigravityAuth) onboardUserAgent() string {
 	return misc.AntigravityOnboardUserUserAgent("")
 }
 
@@ -312,7 +312,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
-	userAgent := o.nodeUserAgent()
+	userAgent := o.onboardUserAgent()
 	requestBody := map[string]any{
 		"tier_id":  tierID,
 		"metadata": antigravityControlPlaneMetadata(userAgent),
@@ -341,10 +341,8 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {

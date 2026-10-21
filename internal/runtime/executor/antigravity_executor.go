@@ -246,6 +246,8 @@ func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *htt
 
 	clone := base.Clone()
 	clone.ForceAttemptHTTP2 = false
+	clone.Protocols = new(http.Protocols)
+	clone.Protocols.SetHTTP1(true)
 	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
 	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 	if clone.TLSClientConfig == nil {
@@ -945,11 +947,14 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = req.Context()
 	}
-	httpReq := req.WithContext(ctx)
+	httpReq := req.Clone(ctx)
+	// Host and trailers are request fields outside the header whitelist.
+	httpReq.Host = ""
+	httpReq.Trailer = nil
 
 	// Connection management is a Request field, not a header, so the header
 	// whitelist below cannot strip it. An inbound "Connection: close" makes Go's
-	// server set Request.Close, and WithContext copies that field verbatim, which
+	// server set Request.Close, and Clone copies that field verbatim, which
 	// would both leak the downstream header upstream and drain the shared pool.
 	httpReq.Close = false
 

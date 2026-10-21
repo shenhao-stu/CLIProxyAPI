@@ -623,11 +623,15 @@ func TestAntigravityTransportMatchesNativeTLSProfile(t *testing.T) {
 			return nil, nil
 		},
 	}
+	server.EnableHTTP2 = true
 	server.StartTLS()
 	defer server.Close()
 
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	base.Protocols = new(http.Protocols)
+	base.Protocols.SetHTTP1(true)
+	base.Protocols.SetHTTP2(true)
 	transport := antigravityHTTP11Transport(antigravityAuthWithIDAndProxy("native-tls-profile", ""), base)
 	resp, errDo := (&http.Client{Transport: transport}).Get(server.URL)
 	if errDo != nil {
@@ -637,6 +641,9 @@ func TestAntigravityTransportMatchesNativeTLSProfile(t *testing.T) {
 		t.Fatalf("close response body: %v", errClose)
 	}
 
+	if !base.Protocols.HTTP2() {
+		t.Fatal("CCPA setup mutated caller protocol settings")
+	}
 	if len(clientHelloProtos) != 0 {
 		t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", clientHelloProtos)
 	}

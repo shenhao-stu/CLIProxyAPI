@@ -690,7 +690,8 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string, der
 }
 
 func generateRequestID() string {
-	return "agent-" + uuid.NewString()
+	// The native client uses this fallback when no trajectory context exists.
+	return "agent/" + uuid.NewString()
 }
 
 func generateImageGenRequestID() string {
