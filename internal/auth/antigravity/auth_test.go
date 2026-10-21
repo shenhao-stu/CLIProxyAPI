@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -45,6 +47,7 @@ func TestFetchProjectIDFallsBackToDailyOnboardUser(t *testing.T) {
 			assertOnboardUserHeaders(t, req)
 			assertJSONContains(t, req, `"tier_id":"free-tier"`)
 			assertJSONContains(t, req, `"ide_type":"ANTIGRAVITY"`)
+			assertJSONContains(t, req, `"ide_version":"`+misc.AntigravityVersionFromUserAgent(req.Header.Get("User-Agent"))+`"`)
 			return jsonResponse(`{
 				"done": true,
 				"response": {
@@ -120,17 +123,17 @@ func assertOnboardUserHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	if got := req.Header.Get("Accept"); got != "*/*" {
+	if got := req.Header.Get("Accept"); got != "" {
 		t.Fatalf("Accept = %q", got)
 	}
-	if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
+	if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
 		t.Fatalf("X-Goog-Api-Client = %q", got)
 	}
 	userAgent := req.Header.Get("User-Agent")
 	if !strings.HasPrefix(userAgent, "antigravity/hub/") {
 		t.Fatalf("User-Agent = %q", userAgent)
 	}
-	if !strings.Contains(userAgent, "google-api-nodejs-client/10.3.0") {
+	if userAgent != misc.AntigravityOnboardUserUserAgent("") {
 		t.Fatalf("User-Agent = %q", userAgent)
 	}
 }

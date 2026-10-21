@@ -41,9 +41,11 @@ func TestAntigravityLoadCodeAssistBaseURL(t *testing.T) {
 		auth *cliproxyauth.Auth
 		want string
 	}{
-		{"default daily", &cliproxyauth.Auth{}, antigravityBaseURLDaily},
-		{"custom attribute", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": antigravityBaseURLProd + "/"}}, antigravityBaseURLProd},
-		{"custom metadata", &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://enterprise.example.com/"}}, "https://enterprise.example.com"},
+		{"nil defaults to daily", nil, antigravityBaseURLDaily},
+		{"empty defaults to daily", &cliproxyauth.Auth{}, antigravityBaseURLDaily},
+		{"attribute override", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://custom.example.com/"}}, "https://custom.example.com"},
+		{"metadata override", &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://custom.example.com/"}}, "https://custom.example.com"},
+		{"attribute has priority", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": antigravityBaseURLProd}, Metadata: map[string]any{"base_url": "https://custom.example.com"}}, antigravityBaseURLProd},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := antigravityLoadCodeAssistBaseURL(tc.auth); got != tc.want {

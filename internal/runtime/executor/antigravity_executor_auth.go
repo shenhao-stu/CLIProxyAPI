@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -161,12 +162,14 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	// OAuth uses Go's negotiated HTTP protocol and default User-Agent. Its native
+	// transport advertises h2 and HTTP/1.1, unlike the CCPA request transport.
+	httpClient := newAntigravityOAuthHTTPClient(ctx, e.cfg, auth)
+	if transport, ok := httpClient.Transport.(*http.Transport); ok {
+		defer transport.CloseIdleConnections()
+	}
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "oauth_refresh").Do(httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -198,6 +201,30 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	}
 
 	return &tokenResp, nil
+}
+
+func newAntigravityOAuthHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	base, ok := client.Transport.(*http.Transport)
+	if client.Transport != nil && !ok {
+		// An injected custom RoundTripper owns its protocol and lifecycle.
+		return client
+	}
+	if base == nil {
+		base = antigravityBaseTransport
+	}
+	transport := base.Clone()
+	transport.ForceAttemptHTTP2 = true
+	transport.TLSNextProto = nil
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
+	if transport.TLSClientConfig != nil {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		transport.TLSClientConfig.NextProtos = nil
+	}
+	client.Transport = transport
+	return client
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
