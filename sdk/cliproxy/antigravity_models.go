@@ -103,8 +103,8 @@ func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints
 	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
 }
 
-// antigravityCapabilityKey isolates catalogs by account, project, route and client
-// fingerprint. Token rotation alone does not invalidate a successful catalog.
+// Pool moves must recheck entitlements instead of waiting for the previous
+// pool's catalog TTL. Token rotation alone still reuses a successful catalog.
 func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -119,7 +119,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy, user
 		token, _ := auth.Metadata["access_token"].(string)
 		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	}
-	return fmt.Sprintf("%q/%d/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent)
+	return fmt.Sprintf("%q/%d/%q/%q/%q/%q/%q", identity, auth.RegistrationEpoch, project, endpoint, proxy, userAgent, auth.Prefix)
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
