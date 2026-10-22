@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -1798,13 +1800,12 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
-	defer func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close corrupted repository: %v", errClose)
-		}
-	}()
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
+	}
+	// Release mmap handles before removing packs so verification reads disk.
+	if errClose := repo.Close(); errClose != nil {
+		t.Fatalf("close repository before corruption: %v", errClose)
 	}
 	objectsDir := filepath.Join(repoDir, ".git", "objects")
 	objectEntries, errReadDir := os.ReadDir(objectsDir)
@@ -1830,6 +1831,15 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
+	repo, errOpen = git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("reopen corrupted repository: %v", errOpen)
+	}
+	defer func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close corrupted repository: %v", errClose)
+		}
+	}()
 	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
@@ -2271,5 +2281,29 @@ func assertRemoteBranchContents(t *testing.T, remoteDir, branch, wantContents st
 	}
 	if contents != wantContents {
 		t.Fatalf("remote branch %s contents = %q, want %q", branch, contents, wantContents)
+	}
+}
+
+func TestRepositoryCorruptionErrorMissingPack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"pack sentinel", dotgit.ErrPackfileNotFound, true},
+		{"object sentinel", plumbing.ErrObjectNotFound, true},
+		{"missing relative pack", &os.PathError{Op: "statat", Path: "objects/pack/pack-abc.pack", Err: os.ErrNotExist}, true},
+		{"wrapped missing absolute pack", fmt.Errorf("packhandle: pack size: %w", &os.PathError{Op: "stat", Path: "/repo/.git/objects/pack/pack-abc.pack", Err: os.ErrNotExist}), true},
+		{"missing config", &os.PathError{Op: "open", Path: "config/config.yaml", Err: os.ErrNotExist}, false},
+		{"unrelated pack name", &os.PathError{Op: "open", Path: "uploads/pack/pack-abc.pack", Err: os.ErrNotExist}, false},
+		{"pack permission failure", &os.PathError{Op: "statat", Path: "objects/pack/pack-abc.pack", Err: os.ErrPermission}, false},
+		{"unqualified not found", os.ErrNotExist, false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRepositoryCorruptionError(tc.err); got != tc.want {
+				t.Fatalf("corruption classification = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
