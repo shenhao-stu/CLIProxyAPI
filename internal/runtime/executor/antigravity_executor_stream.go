@@ -213,6 +213,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var replayCommitted bool
 		var terminalDelivered bool
 		var param any
+		progress := helps.NewGeminiResponsesProgress(baseModel, responseFormat)
+		defer func() {
+			outcomeErr := streamErr
+			if outcomeErr == nil {
+				outcomeErr = scanner.Err()
+			}
+			progress.LogOutcome(ctx, outcomeErr)
+		}()
 		commitReplay := func() {
 			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && helps.ApplyPatchTranslationError(param) == nil {
 				replayAccumulator.Commit(ctx)
@@ -257,6 +265,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			rawLine := line
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if replayAccumulator != nil {
 				replayAccumulator.ObserveSSELine(line)
@@ -283,15 +292,25 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					continue
 				}
 				payload = pendingJSON
+				rawLine = payload
 				pendingJSON = nil
 			} else if payload != nil && !gjson.ValidBytes(payload) {
 				pendingJSON = append([]byte(nil), payload...)
 				continue
 			}
 			if payload == nil {
+				for _, chunk := range progress.Forward(rawLine, nil) {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+						progress.Forwarded(chunk)
+					case <-ctx.Done():
+						return
+					}
+				}
 				continue
 			}
 			if errorResult := gjson.GetBytes(payload, "error"); errorResult.Exists() {
+				progress.Forward(rawLine, nil)
 				statusCode := int(errorResult.Get("code").Int())
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
@@ -310,6 +329,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(payload), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			if helps.ApplyPatchTranslationError(param) == nil {
+				chunks = progress.Forward(rawLine, chunks)
+			}
 			var isTerminalChunk bool
 			if finishReason := gjson.GetBytes(payload, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
 				isTerminalChunk = true
@@ -359,6 +381,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					progress.Forwarded(chunks[i])
 				case <-ctx.Done():
 					return
 				}
@@ -394,6 +417,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Translating [DONE] after a read error would report a truncated
 			// stream as a successful completion.
 			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("[DONE]"), &param, claudeInputTokens)
+			tail = progress.Forward(nil, tail)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			// Commit upstream output before EOF-generated completion reaches interceptors.
 			// Commit itself rejects partial streams without an upstream terminal.

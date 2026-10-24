@@ -385,6 +385,14 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}()
 		var param any
 		var sawFinishReason bool
+		progress := helps.NewGeminiResponsesProgress(baseModel, responseFormat)
+		defer func() {
+			outcomeErr := streamErr
+			if outcomeErr == nil {
+				outcomeErr = scanner.Err()
+			}
+			progress.LogOutcome(ctx, outcomeErr)
+		}()
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -400,16 +408,28 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
 			if len(payload) == 0 {
+				for _, chunk := range progress.Forward(line, nil) {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+						progress.Forwarded(chunk)
+					case <-ctx.Done():
+						return
+					}
+				}
 				continue
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(payload), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			if helps.ApplyPatchTranslationError(param) == nil {
+				lines = progress.Forward(line, lines)
+			}
 			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 				return statusErr{code: http.StatusBadGateway, msg: msg}
 			})
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					progress.Forwarded(lines[i])
 					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
 						terminalDelivered = true
 					}
@@ -455,6 +475,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
+		lines = progress.Forward(nil, lines)
 		helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 			return statusErr{code: http.StatusBadGateway, msg: msg}
