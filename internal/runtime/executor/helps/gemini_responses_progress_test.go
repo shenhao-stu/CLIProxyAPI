@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
@@ -162,5 +163,84 @@ func TestGeminiResponsesProgressSafeOutcome(t *testing.T) {
 	entry = hook.LastEntry()
 	if entry == nil || entry.Data["outcome"] != "canceled" || entry.Data["emitted_progress_count"] != uint64(1) || entry.Data["native_terminal_seen"] != true || entry.Data["translated_terminal_seen"] != false {
 		t.Fatalf("terminal waiting/cancellation summary inaccurate: %#v", entry)
+	}
+}
+
+func TestGeminiResponsesProgressProductionFormatter(t *testing.T) {
+	logger := log.StandardLogger()
+	oldLevel, oldOutput, oldFormatter := logger.GetLevel(), logger.Out, logger.Formatter
+	oldHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	var output bytes.Buffer
+	logger.SetLevel(log.InfoLevel)
+	logger.SetOutput(&output)
+	logger.SetFormatter(&logging.LogFormatter{})
+	t.Cleanup(func() {
+		logger.ReplaceHooks(oldHooks)
+		logger.SetLevel(oldLevel)
+		logger.SetOutput(oldOutput)
+		logger.SetFormatter(oldFormatter)
+	})
+
+	for _, tc := range []struct {
+		name, outcome               string
+		emitted, native, translated bool
+	}{
+		{"read_error", "read_error", false, false, false},
+		{"canceled_waiting_usage", "canceled", true, true, false},
+		{"completed", "closed", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output.Reset()
+			p := startedGeminiProgress(t)
+			if tc.emitted {
+				for _, chunk := range p.Forward([]byte(": private-native-comment"), nil) {
+					p.Forwarded(chunk)
+				}
+			}
+			if tc.native {
+				p.Forward([]byte(`{"candidates":[{"finishReason":"STOP"}]}`), nil)
+			}
+			if tc.translated {
+				p.Forward(nil, [][]byte{[]byte(`data: {"type":"response.completed"}`)})
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var readErr error
+			if tc.outcome == "read_error" {
+				readErr = errors.New("private-error https://source.invalid/private-key")
+			} else if tc.outcome == "canceled" {
+				cancel()
+			}
+			p.LogOutcome(ctx, readErr)
+			count := 0
+			if tc.emitted {
+				count = 1
+			}
+			for _, want := range []string{
+				fmt.Sprintf("emitted_progress_count=%d", count),
+				"responses_started=true",
+				fmt.Sprintf("native_terminal_seen=%t", tc.native),
+				fmt.Sprintf("translated_terminal_seen=%t", tc.translated),
+				"outcome=" + tc.outcome,
+			} {
+				if !strings.Contains(output.String(), want) {
+					t.Errorf("serialized activity summary %q missing %s", output.String(), want)
+				}
+			}
+			if strings.Contains(output.String(), "private") || strings.Contains(output.String(), "https://") {
+				t.Fatalf("activity summary leaked source detail: %q", output.String())
+			}
+		})
+	}
+
+	output.Reset()
+	log.WithFields(log.Fields{
+		"raw_error":    "private-error",
+		"upstream_url": "https://source.invalid/private-key",
+		"request_body": "private-customer-body",
+		"unknown":      "private-arbitrary-field",
+	}).Info("unknown fields remain omitted")
+	if strings.Contains(output.String(), "private") || strings.Contains(output.String(), "https://") {
+		t.Fatalf("formatter expanded beyond the fixed allowlist: %q", output.String())
 	}
 }
