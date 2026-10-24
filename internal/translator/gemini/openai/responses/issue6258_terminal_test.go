@@ -196,7 +196,7 @@ func TestIssue6258GeminiResponsesUsageSnapshots(t *testing.T) {
 		output, reasoning, total int64
 	}{
 		{"absent_preserves", `{"candidatesTokenCount":12,"totalTokenCount":182}`, 62, 50, 182},
-		{"explicit_zero_replaces", `{"candidatesTokenCount":12,"thoughtsTokenCount":0,"totalTokenCount":0}`, 12, 0, 0},
+		{"zero_does_not_erase_observed_usage", `{"candidatesTokenCount":12,"thoughtsTokenCount":0,"totalTokenCount":0}`, 62, 50, 160},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var param any
@@ -210,7 +210,7 @@ func TestIssue6258GeminiResponsesUsageSnapshots(t *testing.T) {
 			} {
 				events = append(events, issue6258Translate(t, &param, frame)...)
 			}
-			issue6258AssertUsage(t, issue6258Terminal(t, events), 120, test.output, test.reasoning, test.total, 0)
+			issue6258AssertUsage(t, issue6258Terminal(t, events), 120, test.output, test.reasoning, test.total, 7)
 		})
 	}
 }
