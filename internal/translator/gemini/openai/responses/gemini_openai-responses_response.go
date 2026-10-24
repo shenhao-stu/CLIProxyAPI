@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -57,29 +59,79 @@ type geminiResponsesUsage struct {
 }
 
 func (usage *geminiResponsesUsage) Merge(root gjson.Result) bool {
-	metadata := root.Get("usageMetadata")
+	metadataName := "usageMetadata"
+	metadata := root.Get(metadataName)
 	if !metadata.Exists() {
-		metadata = root.Get("cpaUsageMetadata")
+		metadataName = "cpaUsageMetadata"
+		metadata = root.Get(metadataName)
 	}
-	if !metadata.Exists() {
+	if !metadata.IsObject() || !gjson.Valid(metadata.Raw) {
 		return false
 	}
-	usage.Present = true
-	for _, field := range []struct {
+	metadataCount := 0
+	root.ForEach(func(key, _ gjson.Result) bool {
+		if key.String() == metadataName {
+			metadataCount++
+		}
+		return metadataCount < 2
+	})
+	if metadataCount != 1 {
+		return false
+	}
+	members := make(map[string]gjson.Result)
+	unique := true
+	metadata.ForEach(func(key, value gjson.Result) bool {
+		name := key.String()
+		if _, exists := members[name]; exists {
+			unique = false
+			return false
+		}
+		members[name] = value
+		return true
+	})
+	if !unique {
+		return false
+	}
+	next := *usage
+	completeZero, positive := true, false
+	for index, field := range []struct {
 		name  string
 		value *int64
 	}{
-		{"promptTokenCount", &usage.Prompt},
-		{"candidatesTokenCount", &usage.Candidates},
-		{"thoughtsTokenCount", &usage.Thoughts},
-		{"totalTokenCount", &usage.Total},
-		{"cachedContentTokenCount", &usage.Cached},
+		{"promptTokenCount", &next.Prompt},
+		{"candidatesTokenCount", &next.Candidates},
+		{"thoughtsTokenCount", &next.Thoughts},
+		{"totalTokenCount", &next.Total},
+		{"cachedContentTokenCount", &next.Cached},
 	} {
-		if value := metadata.Get(field.name); value.Exists() {
-			*field.value = value.Int()
+		value := members[field.name]
+		count, valid := geminiUsageCount(value)
+		if (index < 2 || value.Exists()) && (!valid || count != 0) {
+			completeZero = false
+		}
+		if valid && count > 0 {
+			positive = true
+			// A later placeholder or stale cumulative frame must not erase usage.
+			if count > *field.value {
+				*field.value = count
+			}
 		}
 	}
-	return true
+	if next.Candidates > math.MaxInt64-next.Thoughts {
+		return false
+	}
+	observed := positive || completeZero
+	next.Present = next.Present || observed
+	*usage = next
+	return observed
+}
+
+func geminiUsageCount(value gjson.Result) (int64, bool) {
+	if value.Type != gjson.Number {
+		return 0, false
+	}
+	count, err := strconv.ParseInt(value.Raw, 10, 64)
+	return count, err == nil && count >= 0
 }
 
 func (usage geminiResponsesUsage) JSON() []byte {
