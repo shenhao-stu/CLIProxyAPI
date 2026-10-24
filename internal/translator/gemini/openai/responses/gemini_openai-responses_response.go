@@ -58,7 +58,7 @@ type geminiResponsesUsage struct {
 	Cached     int64
 }
 
-func (usage *geminiResponsesUsage) Merge(root gjson.Result, previousFinish string) bool {
+func (usage *geminiResponsesUsage) Merge(root gjson.Result, terminal bool) bool {
 	metadataName := "usageMetadata"
 	metadata := root.Get(metadataName)
 	if !metadata.Exists() {
@@ -93,7 +93,7 @@ func (usage *geminiResponsesUsage) Merge(root gjson.Result, previousFinish strin
 		return false
 	}
 	next := *usage
-	completeZero, positive := true, false
+	completeZero, positive := terminal, false
 	for index, field := range []struct {
 		name  string
 		value *int64
@@ -120,8 +120,10 @@ func (usage *geminiResponsesUsage) Merge(root gjson.Result, previousFinish strin
 	if next.Candidates > math.MaxInt64-next.Thoughts {
 		return false
 	}
-	if cached, valid := geminiTerminalCache(root, members, usage.Prompt, previousFinish); valid {
-		next.Cached = cached
+	if terminal {
+		if cached, valid := geminiTerminalCache(members, usage.Prompt); valid {
+			next.Cached = cached
+		}
 	}
 	observed := positive || completeZero
 	next.Present = next.Present || observed
@@ -137,18 +139,19 @@ func geminiUsageCount(value gjson.Result) (int64, bool) {
 	return count, err == nil && count >= 0
 }
 
-func geminiTerminalCache(root gjson.Result, members map[string]gjson.Result, previousPrompt int64, finish string) (int64, bool) {
+func geminiHasSourceFinish(root gjson.Result, finish string) bool {
 	if finish == "" {
 		value := root.Get("candidates.0.finishReason")
 		if value.Type != gjson.String {
-			return 0, false
+			return false
 		}
 		finish = value.String()
 	}
 	finish = strings.TrimSpace(finish)
-	if finish == "" || strings.EqualFold(finish, "FINISH_REASON_UNSPECIFIED") {
-		return 0, false
-	}
+	return finish != "" && !strings.EqualFold(finish, "FINISH_REASON_UNSPECIFIED")
+}
+
+func geminiTerminalCache(members map[string]gjson.Result, previousPrompt int64) (int64, bool) {
 	prompt, valid := geminiUsageCount(members["promptTokenCount"])
 	if !valid || prompt <= 0 || prompt < previousPrompt {
 		return 0, false
@@ -484,7 +487,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		return [][]byte{}
 	}
 	root = unwrapGeminiResponseRoot(root)
-	hasUsage := st.Usage.Merge(root, st.FinishReason)
+	hasUsage := st.Usage.Merge(root, geminiHasSourceFinish(root, st.FinishReason))
 	messageStatus := "completed"
 
 	var out [][]byte
@@ -2185,7 +2188,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	var usage geminiResponsesUsage
-	if usage.Merge(root, "") {
+	if usage.Merge(root, true) {
 		resp, _ = sjson.SetRawBytes(resp, "usage", usage.JSON())
 	}
 

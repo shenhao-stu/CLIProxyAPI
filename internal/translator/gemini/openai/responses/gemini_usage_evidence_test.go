@@ -205,6 +205,37 @@ func TestGeminiUsageEvidenceTerminalCacheCorrection(t *testing.T) {
 	}
 }
 
+func TestGeminiUsageEvidenceInitialZeroNeedsSourceFinish(t *testing.T) {
+	const initial = `{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}`
+	const content = `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]}}]}`
+	for _, tc := range []struct {
+		name   string
+		frames []string
+	}{
+		{"source_finish_without_usage", []string{initial, content, `{"candidates":[{"finishReason":"STOP"}]}`, "[DONE]"}},
+		{"synthetic_finish_only", []string{initial, content, "[DONE]"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := completedGeminiMeteringResponse(t, tc.frames...)
+			if response.Get("usage").Exists() {
+				t.Fatal("initial zero usage became authoritative terminal evidence")
+			}
+		})
+	}
+	t.Run("confirmed_late_zero", func(t *testing.T) {
+		response := completedGeminiMeteringResponse(t, content, `{"candidates":[{"finishReason":"STOP"}]}`, initial, "[DONE]")
+		if !response.Get("usage").Exists() || response.Get("usage.total_tokens").Int() != 0 {
+			t.Fatal("complete zero usage after source finish was lost")
+		}
+	})
+	t.Run("nonstream_final_body", func(t *testing.T) {
+		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(initial), nil))
+		if !response.Get("usage").Exists() || response.Get("usage.total_tokens").Int() != 0 {
+			t.Fatal("complete zero usage in final nonstream body was lost")
+		}
+	})
+}
+
 func completedGeminiMeteringResponse(t *testing.T, frames ...string) gjson.Result {
 	t.Helper()
 	var state any
