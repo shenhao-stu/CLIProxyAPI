@@ -127,6 +127,115 @@ func TestGeminiUsageEvidenceDuplicateMetadata(t *testing.T) {
 	}
 }
 
+func TestGeminiUsageEvidenceTerminalCacheCorrection(t *testing.T) {
+	const start = `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1,"totalTokenCount":101,"cachedContentTokenCount":90}}`
+	cases := []struct {
+		name, finish, metadata string
+		cache, output          int64
+	}{
+		{"complete_positive", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":0}`, 0, 15},
+		{"zero_output_preserves_observed_output", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":0,"totalTokenCount":100,"cachedContentTokenCount":0}`, 0, 1},
+		{"positive_cache_correction", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":30}`, 30, 15},
+		{"total_sum_overflow", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":9223372036854775807,"totalTokenCount":99,"cachedContentTokenCount":0}`, 90, 9223372036854775807},
+		{"nonterminal", "", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":0}`, 90, 15},
+		{"unspecified_finish", "FINISH_REASON_UNSPECIFIED", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":0}`, 90, 15},
+		{"partial", "STOP", `{"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":0}`, 90, 15},
+		{"missing_total", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"cachedContentTokenCount":0}`, 90, 15},
+		{"inconsistent_total", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":114,"cachedContentTokenCount":0}`, 90, 15},
+		{"string_cache", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":"0"}`, 90, 15},
+		{"invalid_thoughts", "STOP", `{"promptTokenCount":100,"candidatesTokenCount":15,"thoughtsTokenCount":null,"totalTokenCount":115,"cachedContentTokenCount":0}`, 90, 15},
+		{"all_zero", "STOP", `{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0,"cachedContentTokenCount":0}`, 90, 1},
+		{"stale_prompt", "STOP", `{"promptTokenCount":90,"candidatesTokenCount":15,"totalTokenCount":105,"cachedContentTokenCount":0}`, 90, 15},
+	}
+	for _, tc := range cases {
+		for _, field := range []string{"usageMetadata", "cpaUsageMetadata"} {
+			t.Run(tc.name+"/"+field, func(t *testing.T) {
+				t.Parallel()
+				finish := ""
+				if tc.finish != "" {
+					finish = `"candidates":[{"finishReason":"` + tc.finish + `"}],`
+				}
+				response := completedGeminiMeteringResponse(t, start, `{`+finish+`"`+field+`":`+tc.metadata+`}`, "[DONE]")
+				if got := response.Get("usage.input_tokens_details.cached_tokens").Int(); got != tc.cache {
+					t.Errorf("cache=%d, want=%d", got, tc.cache)
+				}
+				if got := response.Get("usage.output_tokens").Int(); got != tc.output {
+					t.Errorf("output=%d, want=%d", got, tc.output)
+				}
+				if got := response.Get("usage.input_tokens").Int(); got != 100 {
+					t.Errorf("input=%d, want=100", got)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name, metadata string
+		cache          int64
+	}{
+		{"complete", `{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":0}`, 0},
+		{"all_zero", `{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0,"cachedContentTokenCount":0}`, 90},
+		{"partial", `{"promptTokenCount":100,"cachedContentTokenCount":0}`, 90},
+		{"placeholder", `{}`, 90},
+	} {
+		t.Run("usage_after_finish/"+tc.name, func(t *testing.T) {
+			response := completedGeminiMeteringResponse(t, start, `{"candidates":[{"finishReason":"STOP"}]}`, `{"usageMetadata":`+tc.metadata+`}`, "[DONE]")
+			if got := response.Get("usage.input_tokens_details.cached_tokens").Int(); got != tc.cache {
+				t.Errorf("cache=%d, want=%d", got, tc.cache)
+			}
+		})
+	}
+	t.Run("preserve_observed_reasoning", func(t *testing.T) {
+		initial := `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1,"thoughtsTokenCount":5,"totalTokenCount":106,"cachedContentTokenCount":90}}`
+		terminal := `{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":100,"cachedContentTokenCount":0}}`
+		response := completedGeminiMeteringResponse(t, initial, terminal, "[DONE]")
+		for field, want := range map[string]int64{"input_tokens": 100, "output_tokens": 6, "output_tokens_details.reasoning_tokens": 5, "total_tokens": 106, "input_tokens_details.cached_tokens": 0} {
+			if got := response.Get("usage." + field).Int(); got != want {
+				t.Errorf("%s=%d, want=%d", field, got, want)
+			}
+		}
+	})
+	for _, cached := range []string{"0", "30"} {
+		t.Run("nonstream_cache_"+cached, func(t *testing.T) {
+			raw := `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":` + cached + `}}`
+			response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil))
+			if response.Get("usage.input_tokens_details.cached_tokens").Raw != cached || response.Get("usage.input_tokens").Int() != 100 || response.Get("usage.output_tokens").Int() != 15 {
+				t.Fatal("nonstream terminal usage changed")
+			}
+		})
+	}
+}
+
+func TestGeminiUsageEvidenceInitialZeroNeedsSourceFinish(t *testing.T) {
+	const initial = `{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}`
+	const content = `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]}}]}`
+	for _, tc := range []struct {
+		name   string
+		frames []string
+	}{
+		{"source_finish_without_usage", []string{initial, content, `{"candidates":[{"finishReason":"STOP"}]}`, "[DONE]"}},
+		{"synthetic_finish_only", []string{initial, content, "[DONE]"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := completedGeminiMeteringResponse(t, tc.frames...)
+			if response.Get("usage").Exists() {
+				t.Fatal("initial zero usage became authoritative terminal evidence")
+			}
+		})
+	}
+	t.Run("confirmed_late_zero", func(t *testing.T) {
+		response := completedGeminiMeteringResponse(t, content, `{"candidates":[{"finishReason":"STOP"}]}`, initial, "[DONE]")
+		if !response.Get("usage").Exists() || response.Get("usage.total_tokens").Int() != 0 {
+			t.Fatal("complete zero usage after source finish was lost")
+		}
+	})
+	t.Run("nonstream_final_body", func(t *testing.T) {
+		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(initial), nil))
+		if !response.Get("usage").Exists() || response.Get("usage.total_tokens").Int() != 0 {
+			t.Fatal("complete zero usage in final nonstream body was lost")
+		}
+	})
+}
+
 func completedGeminiMeteringResponse(t *testing.T, frames ...string) gjson.Result {
 	t.Helper()
 	var state any
