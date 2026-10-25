@@ -17,6 +17,9 @@ import (
 type GeminiResponsesProgress struct {
 	enabled, started, terminal bool
 	sourceFinished             bool
+	nativeText, nativeThought  bool
+	nativeTool, nativeOther    bool
+	nativeFinish               string
 	usage                      [5]int64
 	seenUsage                  uint8
 	emitted                    uint64
@@ -81,15 +84,22 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		parts = gjson.Result{}
 	}
 	parts.ForEach(func(_, part gjson.Result) bool {
+		if value := part.Get("text"); value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+			if part.Get("thought").Bool() {
+				p.nativeThought = true
+			} else {
+				p.nativeText = true
+			}
+		}
+		p.nativeTool = p.nativeTool || part.Get("functionCall").IsObject()
+		p.nativeOther = p.nativeOther || part.Get("inlineData").IsObject() || part.Get("executableCode").IsObject() || part.Get("codeExecutionResult").IsObject()
 		for _, key := range []string{"text", "thoughtSignature", "thought_signature"} {
 			if value := part.Get(key); value.Type == gjson.String && value.String() != "" {
 				active = true
-				return false
 			}
 		}
 		if value := part.Get("functionCall"); value.IsObject() && value.Get("name").Type == gjson.String && value.Get("name").String() != "" {
 			active = true
-			return false
 		}
 		return true
 	})
@@ -97,6 +107,7 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		reason := strings.TrimSpace(finish.String())
 		if reason != "" && !strings.EqualFold(reason, "FINISH_REASON_UNSPECIFIED") {
 			p.sourceFinished = true
+			p.nativeFinish = safeGeminiFinishReason(reason)
 		}
 	}
 	for i, key := range []string{"promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "cachedContentTokenCount", "totalTokenCount"} {
@@ -118,6 +129,15 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 	return active
 }
 
+func safeGeminiFinishReason(reason string) string {
+	switch value := strings.ToUpper(strings.TrimSpace(reason)); value {
+	case "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "IMAGE_OTHER", "NO_IMAGE", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "MISSING_THOUGHT_SIGNATURE", "LANGUAGE", "OTHER":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
 // Forwarded counts only comments accepted by the downstream stream consumer.
 func (p *GeminiResponsesProgress) Forwarded(chunk []byte) {
 	if bytes.Equal(chunk, []byte(": upstream-activity\n\n")) {
@@ -134,7 +154,9 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
-	if p.emitted == 0 && err == nil && (!p.sourceFinished || p.terminal) {
+	empty := p.sourceFinished && !p.nativeText && !p.nativeThought && !p.nativeTool && !p.nativeOther
+	abnormal := p.nativeFinish != "" && p.nativeFinish != "STOP"
+	if p.emitted == 0 && err == nil && !empty && !abnormal && (!p.sourceFinished || p.terminal) {
 		return
 	}
 	switch {
@@ -149,6 +171,11 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 		"emitted_progress_count":   p.emitted,
 		"responses_started":        p.started,
 		"native_terminal_seen":     p.sourceFinished,
+		"native_finish_reason":     p.nativeFinish,
+		"native_text_seen":         p.nativeText,
+		"native_thought_seen":      p.nativeThought,
+		"native_tool_seen":         p.nativeTool,
+		"native_other_output_seen": p.nativeOther,
 		"translated_terminal_seen": p.terminal,
 		"outcome":                  outcome,
 	}).Info("gemini responses transport activity summary")
