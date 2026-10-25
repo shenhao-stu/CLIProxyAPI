@@ -187,11 +187,26 @@ func (usage geminiResponsesUsage) JSON() []byte {
 	return out
 }
 
-func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails []byte) {
-	if strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") {
-		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails, terminalError []byte) {
+	switch strings.ToUpper(strings.TrimSpace(finishReason)) {
+	case "MAX_TOKENS":
+		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`), nil
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY":
+		return "response.incomplete", "incomplete", []byte(`{"reason":"content_filter"}`), nil
+	case "MALFORMED_RESPONSE":
+		return "response.failed", "failed", nil, []byte(`{"type":"server_error","code":"upstream_malformed_response","status_code":502,"message":"The upstream returned an invalid response."}`)
+	case "MALFORMED_FUNCTION_CALL":
+		return "response.failed", "failed", nil, []byte(`{"type":"server_error","code":"upstream_malformed_function_call","status_code":502,"message":"The upstream returned an invalid function call."}`)
+	default:
+		return "response.completed", "completed", nil, nil
 	}
-	return "response.completed", "completed", nil
+}
+
+func geminiResponsesItemStatus(responseStatus string) string {
+	if responseStatus == "failed" {
+		return "incomplete"
+	}
+	return responseStatus
 }
 
 type geminiToResponsesState struct {
@@ -1299,9 +1314,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if isToolSearch {
 					itemStatus := "completed"
 					if fr := root.Get("candidates.0.finishReason").String(); fr != "" {
-						_, itemStatus, _ = geminiResponsesTerminalState(fr)
+						_, itemStatus, _, _ = geminiResponsesTerminalState(fr)
 					} else if st.FinishReason != "" {
-						_, itemStatus, _ = geminiResponsesTerminalState(st.FinishReason)
+						_, itemStatus, _, _ = geminiResponsesTerminalState(st.FinishReason)
 					}
 					itemID := openAIResponsesToolSearchCallItemID(st.FuncCallIDs[idx])
 					item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{}}`)
@@ -1314,7 +1329,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
 						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
-						itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(itemID, st.FuncCallIDs[idx], itemStatus, argsJSON))
+						itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(itemID, st.FuncCallIDs[idx], geminiResponsesItemStatus(itemStatus), argsJSON))
 						out = append(out, emitEvent("response.output_item.done", itemDone))
 
 						st.FuncDone[idx] = true
@@ -1442,8 +1457,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		if !done && !hasUsage {
 			return out
 		}
-		eventType, status, incompleteDetails := geminiResponsesTerminalState(st.FinishReason)
-		messageStatus = status
+		eventType, status, incompleteDetails, terminalError := geminiResponsesTerminalState(st.FinishReason)
+		messageStatus = geminiResponsesItemStatus(status)
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 			st.PendingReasoningSignature = ""
@@ -1480,7 +1495,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
 					itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 					itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
-					itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(st.FuncCallIDs[idx]), st.FuncCallIDs[idx], status, args))
+					itemDone, _ = sjson.SetRawBytes(itemDone, "item", buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(st.FuncCallIDs[idx]), st.FuncCallIDs[idx], geminiResponsesItemStatus(status), args))
 					out = append(out, emitEvent("response.output_item.done", itemDone))
 				} else if st.FuncCustom[idx] {
 					inputStr := st.FuncInputBuf[idx]
@@ -1643,7 +1658,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 						args = b.String()
 					}
-					outputs = append(outputs, buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, status, args))
+					outputs = append(outputs, buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, geminiResponsesItemStatus(status), args))
 				} else if st.FuncCustom[idx] {
 					inputStr := st.FuncInputBuf[idx]
 					item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
@@ -1676,6 +1691,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		if st.Usage.Present {
 			completed, _ = sjson.SetRawBytes(completed, "response.usage", st.Usage.JSON())
 		}
+		if terminalError != nil {
+			completed, _ = sjson.SetRawBytes(completed, "response.error", terminalError)
+		}
 
 		out = append(out, emitEvent(eventType, completed))
 		st.Completed = true
@@ -1694,10 +1712,13 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
-	_, status, incompleteDetails := geminiResponsesTerminalState(root.Get("candidates.0.finishReason").String())
+	_, status, incompleteDetails, terminalError := geminiResponsesTerminalState(root.Get("candidates.0.finishReason").String())
 	resp, _ = sjson.SetBytes(resp, "status", status)
 	if incompleteDetails != nil {
 		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
+	}
+	if terminalError != nil {
+		resp, _ = sjson.SetRawBytes(resp, "error", terminalError)
 	}
 
 	// id: prefer provider responseId, otherwise synthesize
@@ -1993,7 +2014,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 				var itemJSON []byte
 				if identity.ToolSearch {
-					itemJSON = buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, status, argsStr)
+					itemJSON = buildOpenAIResponsesToolSearchCallItem(openAIResponsesToolSearchCallItemID(callID), callID, geminiResponsesItemStatus(status), argsStr)
 				} else if isCustom {
 					inputStr := util.UnwrapResponsesCustomToolInput(argsStr)
 					if identity.ApplyPatch {
@@ -2158,7 +2179,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("msg_%s_%d", strings.TrimPrefix(id, "resp_"), outputItem.index))
 			itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageOutput.text)
 			if outputItem.index == activeMessageIndex {
-				itemJSON, _ = sjson.SetBytes(itemJSON, "status", status)
+				itemJSON, _ = sjson.SetBytes(itemJSON, "status", geminiResponsesItemStatus(status))
 			}
 			if c := messageCitations[outputItem.index]; len(c) > 0 {
 				itemJSON, _ = sjson.SetRawBytes(itemJSON, "content.0.annotations", translatorcommon.JoinRawArray(c))

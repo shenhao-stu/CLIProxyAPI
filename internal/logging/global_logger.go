@@ -59,6 +59,7 @@ var logFieldOrder = []string{
 	"credential", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
 	"operation", "upstream_host", "reused", "was_idle", "idle_time",
 	"emitted_progress_count", "responses_started", "native_terminal_seen",
+	"native_finish_reason", "native_text_seen", "native_thought_seen", "native_tool_seen", "native_other_output_seen",
 	"translated_terminal_seen", "outcome",
 	"media_session_id", "call_id", "peer", "state", "reason",
 }
