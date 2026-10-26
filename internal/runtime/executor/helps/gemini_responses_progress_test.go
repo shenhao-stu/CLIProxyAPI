@@ -184,10 +184,16 @@ func TestGeminiResponsesProgressProductionFormatter(t *testing.T) {
 	for _, tc := range []struct {
 		name, outcome               string
 		emitted, native, translated bool
+		usage                       string
+		usageFields                 uint8
+		canceled                    bool
 	}{
-		{"read_error", "read_error", false, false, false},
-		{"canceled_waiting_usage", "canceled", true, true, false},
-		{"completed", "closed", true, true, true},
+		{name: "read_error", outcome: "read_error"},
+		{name: "canceled_waiting_usage", outcome: "canceled", emitted: true, native: true, canceled: true},
+		{name: "partial_usage", outcome: "canceled", native: true, usage: `{"usageMetadata":{"promptTokenCount":12}}`, usageFields: 1, canceled: true},
+		{name: "completed_missing_usage", outcome: "closed", emitted: true, native: true, translated: true},
+		{name: "completed_known_zero", outcome: "closed", emitted: true, native: true, translated: true, usage: `{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}}`, usageFields: 3},
+		{name: "completed_then_context_canceled", outcome: "closed", emitted: true, native: true, translated: true, usage: `{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":4}}`, usageFields: 3, canceled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			output.Reset()
@@ -200,6 +206,9 @@ func TestGeminiResponsesProgressProductionFormatter(t *testing.T) {
 			if tc.native {
 				p.Forward([]byte(`{"candidates":[{"finishReason":"STOP"}]}`), nil)
 			}
+			if tc.usage != "" {
+				p.Forward([]byte(tc.usage), nil)
+			}
 			if tc.translated {
 				p.Forward(nil, [][]byte{[]byte(`data: {"type":"response.completed"}`)})
 			}
@@ -208,7 +217,8 @@ func TestGeminiResponsesProgressProductionFormatter(t *testing.T) {
 			var readErr error
 			if tc.outcome == "read_error" {
 				readErr = errors.New("private-error https://source.invalid/private-key")
-			} else if tc.outcome == "canceled" {
+			}
+			if tc.canceled {
 				cancel()
 			}
 			p.LogOutcome(ctx, readErr)
@@ -221,6 +231,8 @@ func TestGeminiResponsesProgressProductionFormatter(t *testing.T) {
 				"responses_started=true",
 				fmt.Sprintf("native_terminal_seen=%t", tc.native),
 				fmt.Sprintf("translated_terminal_seen=%t", tc.translated),
+				fmt.Sprintf("native_usage_fields_seen=%d", tc.usageFields),
+				fmt.Sprintf("context_canceled=%t", tc.canceled),
 				"outcome=" + tc.outcome,
 			} {
 				if !strings.Contains(output.String(), want) {
