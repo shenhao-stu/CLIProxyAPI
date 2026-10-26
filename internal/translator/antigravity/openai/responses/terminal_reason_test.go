@@ -19,7 +19,7 @@ func TestAntigravityNonContentTerminalReason(t *testing.T) {
 				if strings.HasPrefix(reason, "MALFORMED_") {
 					wantStatus, wantReason = "failed", ""
 				} else if reason == "STOP" {
-					wantStatus, wantReason = "completed", ""
+					wantStatus, wantReason = "failed", ""
 				} else if reason == "MAX_TOKENS" {
 					wantReason = "max_output_tokens"
 				}
@@ -58,7 +58,11 @@ func TestAntigravityNonContentTerminalReason(t *testing.T) {
 				if final.Get("status").String() != wantStatus || final.Get("incomplete_details.reason").String() != wantReason {
 					t.Errorf("lost terminal reason: status=%s reason=%s", final.Get("status"), final.Get("incomplete_details.reason"))
 				}
-				if wantStatus == "failed" && (final.Get("error.type").String() != "server_error" || final.Get("error.status_code").Int() != 502 || !strings.HasPrefix(final.Get("error.code").String(), "upstream_malformed_")) {
+				wantCode := "upstream_" + strings.ToLower(reason)
+				if reason == "STOP" {
+					wantCode = "upstream_empty_completion"
+				}
+				if wantStatus == "failed" && (final.Get("error.type").String() != "server_error" || final.Get("error.status_code").Int() != 502 || final.Get("error.code").String() != wantCode) {
 					t.Errorf("format error lost: %s", final.Get("error"))
 				}
 				if final.Get("usage.input_tokens").Int() != 19 || final.Get("usage.output_tokens").Int() != 5 || final.Get("usage.input_tokens_details.cached_tokens").Int() != 7 {
