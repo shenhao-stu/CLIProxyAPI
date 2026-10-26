@@ -28,7 +28,7 @@ func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 
 func TestConvertGeminiResponseToOpenAIResponsesOutputTokensIncludeThoughts(t *testing.T) {
 	var param any
-	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
+	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"synthetic"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
 
 	result := ConvertGeminiResponseToOpenAIResponses(context.Background(), "model", nil, nil, chunk, &param)
 	var completed gjson.Result
@@ -48,7 +48,7 @@ func TestConvertGeminiResponseToOpenAIResponsesOutputTokensIncludeThoughts(t *te
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStreamOutputTokensIncludeThoughts(t *testing.T) {
-	response := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
+	response := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"synthetic reasoning","thought":true}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":0,"thoughtsTokenCount":42,"totalTokenCount":58},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
 
 	result := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "model", nil, nil, response, nil)
 	outputTokens := gjson.GetBytes(result, "usage.output_tokens")

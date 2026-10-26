@@ -51,6 +51,8 @@ type geminiFunctionCallEvidence struct {
 // Gemini usage frames are cumulative snapshots, not additive deltas.
 type geminiResponsesUsage struct {
 	Present    bool
+	seen       uint8
+	complete   bool
 	Prompt     int64
 	Candidates int64
 	Thoughts   int64
@@ -59,6 +61,7 @@ type geminiResponsesUsage struct {
 }
 
 func (usage *geminiResponsesUsage) Merge(root gjson.Result, terminal bool) bool {
+	usage.complete = false
 	metadataName := "usageMetadata"
 	metadata := root.Get(metadataName)
 	if !metadata.Exists() {
@@ -94,6 +97,7 @@ func (usage *geminiResponsesUsage) Merge(root gjson.Result, terminal bool) bool 
 	}
 	next := *usage
 	completeZero, positive := terminal, false
+	frameSeen, validFrame := uint8(0), true
 	for index, field := range []struct {
 		name  string
 		value *int64
@@ -106,10 +110,16 @@ func (usage *geminiResponsesUsage) Merge(root gjson.Result, terminal bool) bool 
 	} {
 		value := members[field.name]
 		count, valid := geminiUsageCount(value)
+		if valid {
+			frameSeen |= 1 << index
+		} else if value.Exists() {
+			validFrame = false
+		}
 		if (index < 2 || value.Exists()) && (!valid || count != 0) {
 			completeZero = false
 		}
 		if valid && count > 0 {
+			next.seen |= 1 << index
 			positive = true
 			// A later placeholder or stale cumulative frame must not erase usage.
 			if count > *field.value {
@@ -126,6 +136,11 @@ func (usage *geminiResponsesUsage) Merge(root gjson.Result, terminal bool) bool 
 		}
 	}
 	observed := positive || completeZero
+	next.complete = terminal && validFrame && frameSeen&3 == 3
+	if next.complete {
+		// A zero primer or separate partial frames cannot prove a final zero bucket.
+		next.seen |= frameSeen
+	}
 	next.Present = next.Present || observed
 	*usage = next
 	return observed
@@ -178,13 +193,28 @@ func geminiTerminalCache(members map[string]gjson.Result, previousPrompt int64) 
 }
 
 func (usage geminiResponsesUsage) JSON() []byte {
-	out := []byte(`{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}`)
-	out, _ = sjson.SetBytes(out, "input_tokens", usage.Prompt)
-	out, _ = sjson.SetBytes(out, "input_tokens_details.cached_tokens", usage.Cached)
-	out, _ = sjson.SetBytes(out, "output_tokens", usage.Candidates+usage.Thoughts)
-	out, _ = sjson.SetBytes(out, "output_tokens_details.reasoning_tokens", usage.Thoughts)
-	out, _ = sjson.SetBytes(out, "total_tokens", usage.Total)
+	out := []byte(`{}`)
+	for index, field := range []struct {
+		path  string
+		value int64
+	}{
+		{"input_tokens", usage.Prompt},
+		{"output_tokens", usage.Candidates + usage.Thoughts},
+		{"output_tokens_details.reasoning_tokens", usage.Thoughts},
+		{"total_tokens", usage.Total},
+		{"input_tokens_details.cached_tokens", usage.Cached},
+	} {
+		if usage.seen&(1<<index) != 0 {
+			out, _ = sjson.SetBytes(out, field.path, field.value)
+		}
+	}
 	return out
+}
+
+// A positive partial snapshot is evidence, but not the final input/output meter.
+func geminiCompleteUsage(root gjson.Result) bool {
+	var snapshot geminiResponsesUsage
+	return snapshot.Merge(root, true) && snapshot.complete
 }
 
 func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails, terminalError []byte) {
@@ -197,6 +227,8 @@ func geminiResponsesTerminalState(finishReason string) (eventType, status string
 		return "response.failed", "failed", nil, []byte(`{"type":"server_error","code":"upstream_malformed_response","status_code":502,"message":"The upstream returned an invalid response."}`)
 	case "MALFORMED_FUNCTION_CALL":
 		return "response.failed", "failed", nil, []byte(`{"type":"server_error","code":"upstream_malformed_function_call","status_code":502,"message":"The upstream returned an invalid function call."}`)
+	case "EMPTY_COMPLETION":
+		return "response.failed", "failed", nil, []byte(`{"type":"server_error","code":"upstream_empty_completion","status_code":502,"message":"The upstream returned no response content."}`)
 	default:
 		return "response.completed", "completed", nil, nil
 	}
@@ -502,7 +534,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		return [][]byte{}
 	}
 	root = unwrapGeminiResponseRoot(root)
-	hasUsage := st.Usage.Merge(root, geminiHasSourceFinish(root, st.FinishReason))
+	st.Usage.Merge(root, geminiHasSourceFinish(root, st.FinishReason))
 	messageStatus := "completed"
 
 	var out [][]byte
@@ -1454,7 +1486,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			st.Completed = true
 			return append(out, emitEvent("response.failed", translatorcommon.ApplyPatchFailure(st.ResponseID, nextSeq())))
 		}
-		if !done && !hasUsage {
+		if !done && !geminiCompleteUsage(root) {
 			return out
 		}
 		eventType, status, incompleteDetails, terminalError := geminiResponsesTerminalState(st.FinishReason)
@@ -1690,6 +1722,11 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		if st.Usage.Present {
 			completed, _ = sjson.SetRawBytes(completed, "response.usage", st.Usage.JSON())
+		}
+		if status == "completed" && len(outputs) == 0 {
+			eventType, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
+			completed, _ = sjson.SetBytes(completed, "type", eventType)
+			completed, _ = sjson.SetBytes(completed, "response.status", status)
 		}
 		if terminalError != nil {
 			completed, _ = sjson.SetRawBytes(completed, "response.error", terminalError)
@@ -2211,6 +2248,11 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var usage geminiResponsesUsage
 	if usage.Merge(root, true) {
 		resp, _ = sjson.SetRawBytes(resp, "usage", usage.JSON())
+	}
+	if status == "completed" && len(outputs) == 0 {
+		_, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
+		resp, _ = sjson.SetBytes(resp, "status", status)
+		resp, _ = sjson.SetRawBytes(resp, "error", terminalError)
 	}
 
 	return resp

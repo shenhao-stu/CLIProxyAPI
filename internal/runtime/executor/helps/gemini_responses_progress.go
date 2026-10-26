@@ -112,6 +112,9 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 	}
 	for i, key := range []string{"promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "cachedContentTokenCount", "totalTokenCount"} {
 		value := root.Get("usageMetadata." + key)
+		if !root.Get("usageMetadata").Exists() {
+			value = root.Get("cpaUsageMetadata." + key)
+		}
 		if value.Type != gjson.Number {
 			continue
 		}
@@ -151,12 +154,13 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 	}
 	outcome := "closed"
 	err := readErr
-	if ctx.Err() != nil {
+	if err == nil && !p.terminal && ctx.Err() != nil {
 		err = ctx.Err()
 	}
 	empty := p.sourceFinished && !p.nativeText && !p.nativeThought && !p.nativeTool && !p.nativeOther
 	abnormal := p.nativeFinish != "" && p.nativeFinish != "STOP"
-	if p.emitted == 0 && err == nil && !empty && !abnormal && (!p.sourceFinished || p.terminal) {
+	missingMeter := p.terminal && p.seenUsage&3 != 3
+	if p.emitted == 0 && err == nil && !empty && !abnormal && !missingMeter && (!p.sourceFinished || p.terminal) {
 		return
 	}
 	switch {
@@ -177,6 +181,8 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 		"native_tool_seen":         p.nativeTool,
 		"native_other_output_seen": p.nativeOther,
 		"translated_terminal_seen": p.terminal,
+		"native_usage_fields_seen": p.seenUsage,
+		"context_canceled":         ctx.Err() != nil,
 		"outcome":                  outcome,
 	}).Info("gemini responses transport activity summary")
 }
