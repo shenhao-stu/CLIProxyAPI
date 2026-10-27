@@ -1552,7 +1552,7 @@ func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
 }
 
 func isRepositoryCorruptionError(err error) bool {
-	if errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
+	if errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, dotgit.ErrIdxNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
 		return true
 	}
 	// The mmap pack reader reports a missing pack as a wrapped PathError.

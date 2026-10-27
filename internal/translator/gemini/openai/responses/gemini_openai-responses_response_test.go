@@ -1642,6 +1642,59 @@ func TestConvertGeminiResponseToOpenAIResponses_PinsRequestPerStream(t *testing.
 	}
 }
 
+func TestConvertGeminiResponseToOpenAIResponses_NonNormalFinishReasonsPreserveFailureClass(t *testing.T) {
+	ctx := context.Background()
+	req := []byte(`{"model":"gemini-4-argon"}`)
+	for _, reason := range []string{"MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL", "SAFETY", "RECITATION", "PROHIBITED_CONTENT"} {
+		wantStatus, wantFilter, wantCode := "incomplete", "content_filter", ""
+		if strings.HasPrefix(reason, "MALFORMED_") {
+			wantStatus, wantFilter, wantCode = "failed", "", "upstream_"+strings.ToLower(reason)
+		}
+		checkTerminal := func(t *testing.T, response gjson.Result) {
+			t.Helper()
+			if got := response.Get("status").String(); got != wantStatus {
+				t.Fatalf("status = %q, want %q", got, wantStatus)
+			}
+			if got := response.Get("incomplete_details.reason").String(); got != wantFilter {
+				t.Fatalf("incomplete reason = %q, want %q", got, wantFilter)
+			}
+			if got := response.Get("error.code").String(); got != wantCode {
+				t.Fatalf("error code = %q, want %q", got, wantCode)
+			}
+			if wantCode != "" && response.Get("error.status_code").Int() != 502 {
+				t.Fatal("malformed upstream response lost its failure status")
+			}
+		}
+		t.Run("stream/"+reason, func(t *testing.T) {
+			var param any
+			chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			var terminals int
+			for _, out := range ConvertGeminiResponseToOpenAIResponses(ctx, "gemini-4-argon", req, nil, chunk, &param) {
+				event, data := parseSSEEvent(t, out)
+				if event == "response.incomplete" || event == "response.failed" {
+					terminals++
+					if event != "response."+wantStatus {
+						t.Fatalf("terminal event = %q, want response.%s", event, wantStatus)
+					}
+					checkTerminal(t, data.Get("response"))
+				}
+				if event == "response.completed" {
+					t.Fatalf("unexpected response.completed for finishReason %s: %s", reason, out)
+				}
+			}
+			if terminals != 1 {
+				t.Fatalf("terminal count = %d, want one for %s", terminals, reason)
+			}
+		})
+
+		t.Run("nonstream/"+reason, func(t *testing.T) {
+			raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-argon","responseId":"resp_1"}`)
+			out := ConvertGeminiResponseToOpenAIResponsesNonStream(ctx, "gemini-4-argon", req, nil, raw, nil)
+			checkTerminal(t, gjson.ParseBytes(out))
+		})
+	}
+}
+
 func BenchmarkConvertGeminiResponseToOpenAIResponses_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","instructions":"` + strings.Repeat("x", 1024*1024) + `"}`)
 	delta := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"token "}]} }],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)

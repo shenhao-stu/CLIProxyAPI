@@ -1465,7 +1465,7 @@ func TestNormalizeSchemaMaxTokensDoesNotTraverseData(t *testing.T) {
 		if wrapped {
 			payload, prefix = `{"schema":`+input+`}`, "schema."
 		}
-		got := normalizeMalformedSchemaObjects(payload, false)
+		got := normalizeMalformedSchemaObjects(payload)
 		for _, key := range []string{"default", "examples", "example", "const", "enum", "x-data"} {
 			path := prefix + key
 			if !reflect.DeepEqual(gjson.Get(got, path).Value(), gjson.Get(payload, path).Value()) {
@@ -1482,7 +1482,7 @@ func TestNormalizeSchemaMaxTokensDoesNotTraverseData(t *testing.T) {
 				t.Errorf("schema name changed at %s: %s", prefix+key, got)
 			}
 		}
-		if again := normalizeMalformedSchemaObjects(got, false); again != got {
+		if again := normalizeMalformedSchemaObjects(got); again != got {
 			t.Errorf("normalization is not idempotent: %s", again)
 		}
 	}
@@ -4563,5 +4563,118 @@ func TestCleanJSONSchema_RemovesReadOnlyWriteOnlyKeywords_Issue6778(t *testing.T
 				t.Errorf("[%s] legitimate property \"writeOnly\" lost its description (%q): %s", name, gotDesc, got)
 			}
 		})
+	}
+}
+
+// TestIssue6950_ArrayItemsFromAllOfPreserved verifies that array schemas whose items come from
+// allOf branches (directly, through a $ref, or alongside a base array $ref/branch) retain their
+// real items schema instead of having it replaced by Phase 0's {"type":"string"} placeholder.
+func TestIssue6950_ArrayItemsFromAllOfPreserved(t *testing.T) {
+	cleaners := map[string]struct {
+		clean             func(string) string
+		preservesNullable bool
+	}{
+		"Antigravity": {
+			clean:             CleanJSONSchemaForAntigravity,
+			preservesNullable: true,
+		},
+		"AntigravityTool": {
+			clean:             func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+			preservesNullable: true,
+		},
+		"AntigravityClaudeTool": {
+			clean:             func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+			preservesNullable: true,
+		},
+		"Gemini": {
+			clean:             CleanJSONSchemaForGemini,
+			preservesNullable: false,
+		},
+	}
+
+	cases := []struct {
+		name         string
+		input        string
+		path         string
+		wantItemType string
+		wantDesc     string
+		wantNullable bool
+	}{
+		{
+			name:         "direct_allof_items",
+			input:        `{"type":"object","properties":{"ids":{"type":"array","allOf":[{"items":{"type":"integer"}}]}}}`,
+			path:         "properties.ids",
+			wantItemType: "integer",
+		},
+		{
+			name:         "ref_in_allof_items",
+			input:        `{"type":"object","properties":{"ids":{"type":"array","allOf":[{"$ref":"#/$defs/Ids"}]}},"$defs":{"Ids":{"type":"array","items":{"type":"integer"}}}}`,
+			path:         "properties.ids",
+			wantItemType: "integer",
+		},
+		{
+			name:         "nullable_type_array_with_ref_in_allof",
+			input:        `{"type":"object","properties":{"ids":{"type":["array","null"],"allOf":[{"$ref":"#/$defs/Ids"}]}},"$defs":{"Ids":{"type":"array","items":{"type":"integer"}}}}`,
+			path:         "properties.ids",
+			wantItemType: "integer",
+			wantDesc:     "(nullable)",
+			wantNullable: true,
+		},
+		{
+			name:         "split_allof_branches",
+			input:        `{"type":"object","properties":{"ids":{"allOf":[{"type":"array","description":"ID list"},{"items":{"type":"integer"}}]}}}`,
+			path:         "properties.ids",
+			wantItemType: "integer",
+			wantDesc:     "ID list",
+		},
+		{
+			name:         "ref_base_array_with_allof_items",
+			input:        `{"type":"object","properties":{"ids":{"$ref":"#/$defs/BaseArray","allOf":[{"items":{"type":"integer"}}]}},"$defs":{"BaseArray":{"type":"array","description":"ID list"}}}`,
+			path:         "properties.ids",
+			wantItemType: "integer",
+			wantDesc:     "ID list",
+		},
+		{
+			name:         "root_array_with_allof_items",
+			input:        `{"type":"array","allOf":[{"items":{"type":"integer"}}]}`,
+			path:         "",
+			wantItemType: "integer",
+		},
+		{
+			name:         "allof_without_items_gets_placeholder",
+			input:        `{"type":"object","properties":{"ids":{"type":"array","allOf":[{"description":"x"}]}}}`,
+			path:         "properties.ids",
+			wantItemType: "string",
+			wantDesc:     "x",
+		},
+	}
+
+	for cleanerName, cleaner := range cleaners {
+		for _, tc := range cases {
+			t.Run(cleanerName+"/"+tc.name, func(t *testing.T) {
+				got := cleaner.clean(tc.input)
+				node := gjson.Parse(got)
+				if tc.path != "" {
+					node = node.Get(tc.path)
+				}
+				if gotType := node.Get("type").String(); gotType != "array" {
+					t.Errorf("type = %q, want \"array\": %s", gotType, got)
+				}
+				if gotItemType := node.Get("items.type").String(); gotItemType != tc.wantItemType {
+					t.Errorf("items.type = %q, want %q: %s", gotItemType, tc.wantItemType, got)
+				}
+				if tc.wantDesc != "" {
+					if gotDesc := node.Get("description").String(); gotDesc != tc.wantDesc {
+						t.Errorf("description = %q, want %q: %s", gotDesc, tc.wantDesc, got)
+					}
+				}
+				if tc.wantNullable && cleaner.preservesNullable {
+					if !node.Get("nullable").Bool() {
+						t.Errorf("nullable = false, want true: %s", got)
+					}
+				}
+				compareJSON(t, got, cleaner.clean(got))
+			})
+		}
 	}
 }
