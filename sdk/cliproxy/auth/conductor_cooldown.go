@@ -956,7 +956,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
-		if result.Success {
+		if auth.Disabled || auth.Status == StatusDisabled {
+			// In-flight outcomes still count, but cannot restore a disabled credential.
+		} else if result.Success {
 			if wasTerminalUnauthorized {
 				if modelKey != "" {
 					state := ensureModelState(auth, modelKey)
@@ -1305,6 +1307,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		if !result.Success && isProviderAccountSuspension(auth.Provider, result.Error) {
+			auth.Disabled = true
+			auth.Status = StatusDisabled
+			auth.Unavailable = true
+			auth.StatusMessage = "provider account suspended: TOS_VIOLATION"
+			auth.LastError = cloneError(result.Error)
+			auth.NextRefreshAfter = time.Time{}
+			auth.NextRetryAfter = time.Time{}
+			if auth.Metadata != nil {
+				auth.Metadata["disabled"] = true
+			}
+			result.CredentialScope = true
+		}
 		if rejectsToken {
 			tokenToReject := result.AccessToken
 			if tokenToReject == "" {
