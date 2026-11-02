@@ -628,6 +628,7 @@ type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	done     chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -641,7 +642,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -655,26 +656,55 @@ func (m *Manager) Start(ctx context.Context) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
+		workerCtx, cancel := context.WithCancel(ctx)
+		m.mu.Lock()
+		m.cancel = cancel
+		m.mu.Unlock()
 		go m.run(workerCtx)
 	})
 }
 
-// Stop stops the dispatcher and drains the queue.
+// Stop closes admission and asynchronously drains accepted records.
+// Use StopAndWait before unloading plugins or exiting the process.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
+	// Starting an unused dispatcher also gives StopAndWait a completion barrier.
+	m.Start(context.Background())
 	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
 		m.mu.Lock()
 		m.closed = true
-		m.mu.Unlock()
+		cancel := m.cancel
 		m.cond.Broadcast()
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	})
+}
+
+// StopAndWait waits for every accepted callback to return. A timeout only bounds
+// the caller's wait; callbacks keep draining and plugins must remain loaded.
+func (m *Manager) StopAndWait(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.Stop()
+	select {
+	case <-m.done:
+		return nil
+	default:
+	}
+	select {
+	case <-m.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Register appends a plugin to the delivery list.
@@ -767,6 +797,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -827,3 +858,6 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// StopDefaultAndWait drains the process-wide dispatcher before plugin shutdown.
+func StopDefaultAndWait(ctx context.Context) error { return DefaultManager().StopAndWait(ctx) }

@@ -21,3 +21,9 @@ A truncate/write save can race the second read in the configuration watcher. Str
 The plugin C ABI remains 1 while the host RPC schema advances from 7 to 10. New fields are capability/version gated. Source tests do not prove compatibility of deployed closed-source plugins: validate both original binary hashes in a Linux candidate with no production auth directory and no external network access before switching.
 
 Preserve configuration, auth files, pool prefixes, suspension and quota state, usage-flush behavior, and current memory limits. Drain in-flight requests before replacing the single auth-state writer. Keep a tested rollback image; do not restore an older auth directory or ledger. Production model support and accounting require their own exact trace and usage evidence after deployment.
+
+## Accepted usage drain barrier
+
+`Manager.StopAndWait(ctx)` closes admission and waits for the queue records already accepted by the manager and their synchronous plugin callbacks to complete. A canceled or expired wait returns an error without unloading the plugins; a repeated service shutdown retains that incomplete result. The success log is emitted only after this barrier, before plugin detachment.
+
+This barrier does not wait for arbitrary active HTTP handlers or producers that have not yet published. The existing API `Server.Stop` closes connections; it is not a native graceful handler-drain proof. Production release still requires an external admission gate, verified zero in-flight work and final plugin/durable-store evidence before process termination. A successful dispatcher marker is necessary evidence, not sufficient proof of all accounting persistence or all in-flight request completion.

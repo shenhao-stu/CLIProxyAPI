@@ -108,6 +108,8 @@ type Service struct {
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
+	// shutdownErr retains an incomplete drain result for all later Shutdown callers.
+	shutdownErr error
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager

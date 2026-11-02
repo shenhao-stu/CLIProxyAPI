@@ -260,6 +260,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
+		defer func() { s.shutdownErr = shutdownErr }()
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -369,8 +370,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+				// Active handlers may still publish final usage. Do not close its queue.
+				return
 			}
 		}
+
+		if errDrain := usage.StopDefaultAndWait(ctx); errDrain != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("usage dispatch drain incomplete: %w", errDrain))
+			log.Errorf("usage dispatch drain incomplete; plugins remain loaded: %v", errDrain)
+			return
+		}
+		log.Info("usage dispatcher drained before plugin shutdown")
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
@@ -391,9 +401,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
-		usage.StopDefault()
 	})
-	return shutdownErr
+	return s.shutdownErr
 }
 
 func (s *Service) ensureAuthDir() error {
