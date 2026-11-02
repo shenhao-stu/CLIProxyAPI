@@ -45,12 +45,15 @@ func TestProviderSuspensionDisablesCredentialAndPersists(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.MarkResult(ctx, Result{AuthID: "suspended-auth", Provider: "antigravity", Model: "gemini-b", Success: true})
+			m.MarkResult(ctx, Result{AuthID: "suspended-auth", Provider: "antigravity", Model: "gemini-b", Success: true, CompletedResponse: true})
 		}()
 	}
 	wg.Wait()
 	check()
 	a, _ := m.GetByID("suspended-auth")
+	if a.InferenceVerified || !a.LastInferenceVerifiedAt.IsZero() {
+		t.Fatal("late completed response verified a disabled credential")
+	}
 	if a.Success != 8 || a.Failed != 1 {
 		t.Fatalf("real outcomes lost: success=%d failed=%d", a.Success, a.Failed)
 	}
