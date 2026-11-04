@@ -1682,7 +1682,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 
 	// Preserve the first source finish, including across a usage-only tail or [DONE].
-	if fr := root.Get("candidates.0.finishReason").String(); fr != "" && st.FinishReason == "" {
+	if fr := root.Get("candidates.0.finishReason").String(); geminiHasSourceFinish(root, "") && st.FinishReason == "" {
 		st.FinishReason = fr
 	}
 	if st.FinishReason != "" && st.ActiveStreamingFunc == nil && !st.HasFailedStreamingFunc {
