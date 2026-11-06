@@ -58,6 +58,7 @@ var logFieldOrder = []string{
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
 	"credential", "auth_id", "auth_index", "connection", "proxy_scheme", "remote_transport",
 	"operation", "upstream_host", "reused", "was_idle", "idle_time",
+	"cpa_stream_id", "stream_format", "last_stream_event", "stream_tool_seen", "first_native_ms", "wire_output_tokens",
 	"emitted_progress_count", "responses_started", "native_terminal_seen",
 	"native_finish_reason", "native_text_seen", "native_thought_seen", "native_tool_seen", "native_other_output_seen",
 	"translated_terminal_seen", "native_usage_fields_seen", "context_canceled", "outcome",

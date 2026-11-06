@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -10,12 +11,7 @@ import (
 // payload rules. Conversation history, tool data and later instructions retain
 // their original text.
 func NormalizeArgonSDKOpening(model string, doc *ojson.Doc) {
-	switch model {
-	case "gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high":
-	default:
-		return
-	}
-	if doc == nil {
+	if doc == nil || !util.IsGeminiArgon(model) {
 		return
 	}
 

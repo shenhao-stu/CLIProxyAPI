@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
@@ -212,6 +213,59 @@ func TestGetokenArgonSDKIdentityOnWire(t *testing.T) {
 			}
 			if !strings.Contains(ojson.GetBytes(body, "request.contents").Raw, user) {
 				t.Fatal("user text changed or missing")
+			}
+		})
+	}
+}
+
+func TestArgonAgentTerminalDoesNotWaitForTransportEOF(t *testing.T) {
+	for _, tc := range []struct{ name, frame, tail string }{
+		{"native-stop", `{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"x":1}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3,"totalTokenCount":12}}}`, ""},
+		{"protocol-done", `{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"x":1}}}]}}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3,"totalTokenCount":12}}}`, "data: [DONE]\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			written := make(chan struct{})
+			release := make(chan struct{})
+			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: "+tc.frame+"\n\n"+tc.tail)
+				w.(http.Flusher).Flush()
+				close(written)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			defer s.Close()
+			defer close(release)
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", s.Client().Transport))
+			defer cancel()
+			a := antigravityAuthWithIDAndProxy(t.Name(), "")
+			a.Attributes = map[string]string{"base_url": s.URL}
+			e := NewAntigravityExecutor(&config.Config{})
+			res, err := e.ExecuteStream(ctx, a, cliproxyexecutor.Request{Model: "gemini-4-argon-high", Payload: []byte(`{"messages":[{"role":"user","content":"check"}],"max_tokens":64,"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"x":{"type":"integer"}}}}]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-written
+			end := time.After(1200 * time.Millisecond)
+			var wire strings.Builder
+			for {
+				select {
+				case chunk, ok := <-res.Chunks:
+					if !ok {
+						if strings.Count(wire.String(), "event: message_stop") != 1 || !strings.Contains(wire.String(), `"output_tokens":3`) || !strings.Contains(wire.String(), `"stop_reason":"tool_use"`) {
+							t.Fatal("missing metered tool terminal", wire.String())
+						}
+						return
+					}
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					wire.Write(chunk.Payload)
+				case <-end:
+					t.Fatal("completed upstream tool turn still waiting for HTTP EOF")
+				}
 			}
 		})
 	}

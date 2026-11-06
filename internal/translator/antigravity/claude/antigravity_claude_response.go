@@ -61,6 +61,8 @@ func formatClaudeSignatureValue(modelName, signature string) string {
 // This structure tracks the current state of the response translation process to ensure
 // proper sequencing of SSE events and transitions between different content types.
 type Params struct {
+	argonUsage              translatorcommon.GeminiUsageSnapshot
+	argonClosed             bool
 	ModelName               string // Resolved once from the translated request
 	WebSearchStreamMode     bool   // Resolved once from both request formats
 	RequestMetadataResolved bool   // Also caches empty model names and disabled web search
@@ -145,7 +147,15 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	}
 	modelName := params.ModelName
 
+	argon := util.IsGeminiArgon(modelName)
+	if argon && params.argonClosed {
+		return nil
+	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		if argon {
+			var tail []byte
+			return [][]byte{finishArgonMessage(params, tail)}
+		}
 		output := make([]byte, 0, 256)
 		if params.HasFirstResponse && !params.HasContent {
 			output = translatorcommon.AppendSSEEventString(output, "content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex), 3)
@@ -473,15 +483,23 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		}
 	}
 
-	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		params.HasFinishReason = true
-		if finishReason := strings.TrimSpace(finishReasonResult.String()); finishReason != "" {
-			params.FinishReason = strings.Clone(finishReason)
-			flushPendingToolInput()
+	if fr := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); fr.Exists() {
+		finish := strings.TrimSpace(fr.String())
+		if !argon || (fr.Type == ojson.String && translatorcommon.GeminiHasSourceFinish(ojson.Result{}, finish)) {
+			params.HasFinishReason = true
+			if finish != "" {
+				params.FinishReason = strings.Clone(finish)
+				flushPendingToolInput()
+			}
 		}
 	}
-
-	if usageResult := ojson.GetBytesNoCopy(rawJSON, "response.usageMetadata"); usageResult.Exists() {
+	if argon {
+		root := ojson.GetBytesNoCopy(rawJSON, "response")
+		// A placeholder may carry partial usage before the tool arguments arrive.
+		provisional := strings.EqualFold(strings.TrimSpace(root.Get("candidates.0.finishReason").String()), "FINISH_REASON_UNSPECIFIED")
+		params.argonUsage.Merge(root, !provisional)
+	}
+	if usageResult := ojson.GetBytesNoCopy(rawJSON, "response.usageMetadata"); !argon && usageResult.Exists() {
 		params.HasUsageMetadata = true
 		rawPromptTokenCount := usageResult.Get("promptTokenCount").Int()
 		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
@@ -506,11 +524,32 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		appendBufferedWebSearchTextBlock(params, appendEvent)
 	}
 
-	if params.HasUsageMetadata && params.HasFinishReason {
+	if argon {
+		if params.HasFinishReason && params.argonUsage.Complete {
+			output = finishArgonMessage(params, output)
+		}
+	} else if params.HasUsageMetadata && params.HasFinishReason {
 		appendFinalEvents(params, &output, false)
 	}
 
 	return [][]byte{output}
+}
+
+// Finalize a tool turn only once, on a real finish with a complete meter or at
+// the protocol boundary. An unmetered EOF cannot produce an invented zero.
+func finishArgonMessage(p *Params, output []byte) []byte {
+	p.argonClosed = true
+	u := p.argonUsage
+	if !p.HasSemanticContent || !u.Complete || u.Cached > u.Prompt {
+		return translatorcommon.AppendSSEEventString(output, "error", `{"type":"error","error":{"type":"upstream_error","message":"Upstream stream ended without complete content and usage."}}`, 3)
+	}
+	p.PromptTokenCount = u.Prompt - u.Cached
+	p.CandidatesTokenCount = u.Candidates
+	p.ThoughtsTokenCount = u.Thoughts
+	p.CachedTokenCount = u.Cached
+	p.TotalTokenCount = u.Total
+	appendFinalEvents(p, &output, true)
+	return translatorcommon.AppendSSEEventString(output, "message_stop", `{"type":"message_stop"}`, 3)
 }
 
 func appendWebSearchBufferedText(partsResult ojson.Result, buffer *strings.Builder) {
@@ -564,7 +603,7 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 
 	stopReason := resolveStopReason(params)
 	usageOutputTokens := params.CandidatesTokenCount + params.ThoughtsTokenCount
-	if usageOutputTokens == 0 && params.TotalTokenCount > 0 {
+	if !params.argonClosed && usageOutputTokens == 0 && params.TotalTokenCount > 0 {
 		// PromptTokenCount excludes cached tokens for input_tokens, while
 		// TotalTokenCount includes them; add the cache back for the fallback.
 		usageOutputTokens = params.TotalTokenCount - (params.PromptTokenCount + params.CachedTokenCount)

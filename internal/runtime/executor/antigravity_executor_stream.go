@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -136,6 +137,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
+	trace := helps.NewArgonStreamTrace(baseModel, responseFormat, time.Now())
+	argonClaude := util.IsGeminiArgon(baseModel) && responseFormat == sdktranslator.FormatClaude
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate_stream").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -221,6 +224,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var replayCommitted bool
 		var terminalDelivered bool
 		var param any
+		defer trace.Log(ctx)
 		progress := helps.NewGeminiResponsesProgress(baseModel, responseFormat)
 		defer func() {
 			outcomeErr := streamErr
@@ -275,6 +279,22 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			// The explicit SSE terminator ends a turn independently of the HTTP socket.
+			frame := bytes.TrimSpace(line)
+			if data, ok := bytes.CutPrefix(frame, []byte("data:")); ok {
+				frame = bytes.TrimSpace(data)
+			}
+			if argonClaude && bytes.Equal(frame, []byte("[DONE]")) {
+				if len(pendingJSON) != 0 {
+					streamErr = statusErr{code: http.StatusBadGateway, msg: "Upstream ended inside an incomplete stream frame"}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				break
+			}
 			rawLine := line
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if replayAccumulator != nil {
@@ -285,6 +305,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			streamUsage.ObserveAntigravityStream(line)
 
 			payload := helps.JSONPayload(line)
+			if len(payload) > 0 {
+				trace.Native()
+			}
 			if len(pendingJSON) > 0 {
 				trimmedLine := bytes.TrimSpace(line)
 				if bytes.HasPrefix(trimmedLine, []byte("data:")) {
@@ -346,37 +369,47 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					chunks = progress.Forward(source, chunks)
 				}
 				var isTerminalChunk bool
-				if finishReason := ojson.GetBytesNoCopy(p, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-					isTerminalChunk = true
-				} else if finishReason := ojson.GetBytesNoCopy(p, "response.candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-					isTerminalChunk = true
-				} else if replayAccumulator != nil && replayAccumulator.terminal {
-					isTerminalChunk = true
-				}
-				if !isTerminalChunk {
+				if argonClaude {
 					for _, chunk := range chunks {
-						for _, cLine := range bytes.Split(chunk, []byte("\n")) {
-							trimmed := bytes.TrimSpace(cLine)
-							if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
-								isTerminalChunk = true
-								break
-							}
-							cPayload := helps.JSONPayload(cLine)
-							if len(cPayload) == 0 {
-								continue
-							}
-							cType := ojson.GetBytesNoCopy(cPayload, "type").String()
-							if cType == "response.completed" || cType == "message_stop" {
-								isTerminalChunk = true
-								break
-							}
-							if finishReason := ojson.GetBytesNoCopy(cPayload, "choices.0.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-								isTerminalChunk = true
-								break
-							}
-						}
-						if isTerminalChunk {
+						if helps.IsGeminiTerminalStreamChunk(chunk) {
+							isTerminalChunk = true
 							break
+						}
+					}
+					helps.CaptureTranslatedClaudeStreamError(responseFormat, chunks, &streamErr, func(msg string) error { return statusErr{code: http.StatusBadGateway, msg: msg} })
+				} else {
+					if finishReason := ojson.GetBytesNoCopy(p, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+						isTerminalChunk = true
+					} else if finishReason := ojson.GetBytesNoCopy(p, "response.candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+						isTerminalChunk = true
+					} else if replayAccumulator != nil && replayAccumulator.terminal {
+						isTerminalChunk = true
+					}
+					if !isTerminalChunk {
+						for _, chunk := range chunks {
+							for _, cLine := range bytes.Split(chunk, []byte("\n")) {
+								trimmed := bytes.TrimSpace(cLine)
+								if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
+									isTerminalChunk = true
+									break
+								}
+								cPayload := helps.JSONPayload(cLine)
+								if len(cPayload) == 0 {
+									continue
+								}
+								cType := ojson.GetBytesNoCopy(cPayload, "type").String()
+								if cType == "response.completed" || cType == "message_stop" {
+									isTerminalChunk = true
+									break
+								}
+								if finishReason := ojson.GetBytesNoCopy(cPayload, "choices.0.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+									isTerminalChunk = true
+									break
+								}
+							}
+							if isTerminalChunk {
+								break
+							}
 						}
 					}
 				}
@@ -393,12 +426,16 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 						progress.Forwarded(chunks[i])
+						trace.Forwarded(chunks[i])
 					case <-ctx.Done():
 						return false
 					}
 				}
 				if isTerminalChunk {
 					terminalDelivered = true
+				}
+				if argonClaude && (isTerminalChunk || streamErr != nil) {
+					return false
 				}
 				return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			}
@@ -456,6 +493,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// end that way (see antigravityNoFinishReasonSSE).
 			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("[DONE]"), &param, claudeInputTokens)
 			tail = progress.Forward(nil, tail)
+			if argonClaude {
+				helps.CaptureTranslatedClaudeStreamError(responseFormat, tail, &streamErr, func(msg string) error { return statusErr{code: http.StatusBadGateway, msg: msg} })
+			}
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			// Commit upstream output before EOF-generated completion reaches interceptors.
 			// Commit itself rejects partial streams without an upstream terminal.
@@ -463,11 +503,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			for i := range tail {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
+					trace.Forwarded(tail[i])
 				case <-ctx.Done():
 					return
 				}
 			}
-			terminalDelivered = true
+			terminalDelivered = streamErr == nil
 		}
 	}(httpResp)
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
