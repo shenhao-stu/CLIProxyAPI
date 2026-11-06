@@ -2739,10 +2739,12 @@ func (a *antigravityReasoningReplayAccumulator) claimPrecedingTurnThoughtSignatu
 }
 
 func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload []byte) {
-	if finishReason := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "response.candidates.0.finishReason").String()); finishReason != "" {
-		a.terminal = true
-	} else if finishReason := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "candidates.0.finishReason").String()); finishReason != "" {
-		a.terminal = true
+	for _, path := range []string{"response.candidates.0.finishReason", "candidates.0.finishReason"} {
+		finish := strings.TrimSpace(ojson.GetBytesNoCopy(payload, path).String())
+		if finish != "" && (!util.IsGeminiArgon(a.scope.modelName) || !strings.EqualFold(finish, "FINISH_REASON_UNSPECIFIED")) {
+			a.terminal = true
+			break
+		}
 	}
 	parts := ojson.GetBytesNoCopy(payload, "response.candidates.0.content.parts")
 	if !parts.IsArray() {

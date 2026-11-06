@@ -277,6 +277,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var pendingFilterPayload []byte
 		var pendingFilterMsg string
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
+		protocolDone := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			// The explicit SSE terminator ends a turn independently of the HTTP socket.
@@ -293,6 +294,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					}
 					return
 				}
+				protocolDone = true
 				break
 			}
 			rawLine := line
@@ -413,6 +415,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 						}
 					}
 				}
+				if argonClaude && isTerminalChunk && streamErr == nil {
+					commitReplay()
+				}
 				if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && responseFormat == sdktranslator.FormatOpenAIResponse {
 					for _, chunk := range chunks {
 						for _, line := range bytes.Split(chunk, []byte("\n")) {
@@ -497,9 +502,15 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				helps.CaptureTranslatedClaudeStreamError(responseFormat, tail, &streamErr, func(msg string) error { return statusErr{code: http.StatusBadGateway, msg: msg} })
 			}
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			// Commit upstream output before EOF-generated completion reaches interceptors.
-			// Commit itself rejects partial streams without an upstream terminal.
-			commitReplay()
+			// Publish scoped replay before the client can send its tool result.
+			// Explicit DONE plus a validated Claude terminal also proves a native
+			// no-finish tool turn. A broken or unmetered turn cannot replace history.
+			if streamErr == nil {
+				if argonClaude && protocolDone && replayAccumulator != nil && len(tail) > 0 && helps.IsGeminiTerminalStreamChunk(tail[0]) {
+					replayAccumulator.terminal = true
+				}
+				commitReplay()
+			}
 			for i := range tail {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:

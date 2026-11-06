@@ -270,3 +270,16 @@ func TestArgonAgentTerminalDoesNotWaitForTransportEOF(t *testing.T) {
 		})
 	}
 }
+
+func TestArgonProvisionalToolTurnCannotCommitReplay(t *testing.T) {
+	a := antigravityReasoningReplayAccumulator{}
+	a.scope.modelName = "gemini-4-argon-high"
+	a.observeResponsePayload([]byte(`{"response":{"candidates":[{"finishReason":"FINISH_REASON_UNSPECIFIED"}]}}`))
+	if a.terminal {
+		t.Fatal("premature replay commit")
+	}
+	a.observeResponsePayload([]byte(`{"response":{"candidates":[{"finishReason":"STOP"}]}}`))
+	if !a.terminal {
+		t.Fatal("ignored real source finish")
+	}
+}
