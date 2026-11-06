@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestAntigravityNonContentTerminalReason(t *testing.T) {
@@ -23,10 +23,10 @@ func TestAntigravityNonContentTerminalReason(t *testing.T) {
 				} else if reason == "MAX_TOKENS" {
 					wantReason = "max_output_tokens"
 				}
-				var final gjson.Result
+				var final ojson.Result
 				if mode == "buffered" {
 					data := []byte(`{"response":` + terminal + `}`)
-					final = gjson.ParseBytes(ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, data, nil))
+					final = ojson.ParseBytes(ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, data, nil))
 				} else {
 					frames := []string{`{"response":` + terminal + `}`, "[DONE]"}
 					if mode == "late_usage" {
@@ -40,7 +40,7 @@ func TestAntigravityNonContentTerminalReason(t *testing.T) {
 								if !strings.HasPrefix(line, "data:") {
 									continue
 								}
-								event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+								event := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 								if kind := event.Get("type").String(); kind == "response.completed" || kind == "response.incomplete" || kind == "response.failed" {
 									terminals++
 									final = event.Get("response")

@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestGetokenAntigravitySerializedHeaderBoundary(t *testing.T) {
@@ -35,7 +35,7 @@ func TestGetokenAntigravitySerializedHeaderBoundary(t *testing.T) {
 			clientHello := make(chan []string, 1)
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
-				observed <- observation{r.Header.Clone(), r.Trailer.Clone(), r.Host, r.URL.Path, r.Proto, r.TLS.NegotiatedProtocol, gjson.GetBytes(body, "requestId").String()}
+				observed <- observation{r.Header.Clone(), r.Trailer.Clone(), r.Host, r.URL.Path, r.Proto, r.TLS.NegotiatedProtocol, ojson.GetBytes(body, "requestId").String()}
 				const response = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
 				w.Header().Set("Content-Type", "application/json")
 				switch route.name {
@@ -140,6 +140,78 @@ func TestGetokenAntigravitySerializedHeaderBoundary(t *testing.T) {
 						t.Errorf("downstream value escaped: %q", value)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestGetokenArgonSDKIdentityOnWire(t *testing.T) {
+	const user = "Document claude-sdk without renaming it."
+	const identity = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+	claude := `{"system":[{"type":"text","text":"` + identity + `"}],"messages":[{"role":"user","content":"` + user + `"}],"max_tokens":128}`
+	chat := `{"messages":[{"role":"system","content":"` + identity + `"},{"role":"user","content":"` + user + `"}]}`
+	for _, tc := range []struct {
+		name    string
+		format  sdktranslator.Format
+		payload string
+	}{
+		{"messages", sdktranslator.FormatClaude, claude},
+		{"stream-chat", sdktranslator.FormatOpenAI, chat},
+		{"count", sdktranslator.FormatClaude, claude},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := make(chan []byte, 1)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+				}
+				observed <- body
+				const response = `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+				switch tc.name {
+				case "count":
+					_, _ = io.WriteString(w, `{"totalTokens":2}`)
+				case "stream-chat":
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: "+response+"\n\n")
+				default:
+					_, _ = io.WriteString(w, response)
+				}
+			}))
+			defer server.Close()
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", server.Client().Transport)
+			auth := antigravityAuthWithIDAndProxy(t.Name(), "")
+			auth.Attributes = map[string]string{"base_url": server.URL}
+			e := NewAntigravityExecutor(&config.Config{})
+			req := cliproxyexecutor.Request{Model: "gemini-4-argon-high", Payload: []byte(tc.payload)}
+			opts := cliproxyexecutor.Options{SourceFormat: tc.format, ResponseFormat: tc.format}
+			var err error
+			switch tc.name {
+			case "count":
+				_, err = e.CountTokens(ctx, auth, req, opts)
+			case "stream-chat":
+				var result *cliproxyexecutor.StreamResult
+				result, err = e.ExecuteStream(ctx, auth, req, opts)
+				if err == nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+					}
+				}
+			default:
+				_, err = e.Execute(ctx, auth, req, opts)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := <-observed
+			system := ojson.GetBytes(body, "request.systemInstruction.parts").Raw
+			if !strings.Contains(system, "You are a coding agent.") || strings.Contains(system, "Claude Agent SDK") {
+				t.Fatalf("unexpected synthetic system instruction: %s", system)
+			}
+			if !strings.Contains(ojson.GetBytes(body, "request.contents").Raw, user) {
+				t.Fatal("user text changed or missing")
 			}
 		})
 	}

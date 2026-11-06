@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -17,7 +18,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestGeminiResponsesProgressHandler(t *testing.T) {
@@ -87,7 +87,7 @@ func TestGeminiResponsesProgressHandler(t *testing.T) {
 				if !strings.HasPrefix(line, "data: ") {
 					continue
 				}
-				root := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				root := ojson.Parse(strings.TrimPrefix(line, "data: "))
 				if root.Get("type").String() == "response.completed" {
 					terminals++
 					if usage := root.Get("response.usage"); usage.Get("input_tokens").Int() != 10 || usage.Get("output_tokens").Int() != 7 || usage.Get("total_tokens").Int() != 17 {

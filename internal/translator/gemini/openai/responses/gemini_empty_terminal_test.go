@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiEmptyTerminalIsFailureWithoutRewritingMeter(t *testing.T) {
@@ -14,9 +14,9 @@ func TestGeminiEmptyTerminalIsFailureWithoutRewritingMeter(t *testing.T) {
 			var state any
 			events := issue6258Translate(t, &state, raw)
 			events = append(events, issue6258Translate(t, &state, "[DONE]")...)
-			for _, response := range []gjson.Result{
+			for _, response := range []ojson.Result{
 				issue6258Terminal(t, events),
-				gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
+				ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
 			} {
 				if response.Get("status").String() != "failed" || response.Get("error.code").String() != "upstream_empty_completion" || response.Get("error.status_code").Int() != 502 {
 					t.Fatalf("empty response falsely completed: %s", response.Raw)

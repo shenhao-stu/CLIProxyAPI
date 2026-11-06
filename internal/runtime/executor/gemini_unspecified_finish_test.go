@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiResponsesUnspecifiedFinishWaitsForNativeTerminal(t *testing.T) {
@@ -58,7 +58,7 @@ func TestGeminiResponsesUnspecifiedFinishWaitsForNativeTerminal(t *testing.T) {
 				}))
 				defer server.Close()
 				result := executeProgressStream(t, context.Background(), provider, server.URL)
-				var terminals []gjson.Result
+				var terminals []ojson.Result
 				for chunk := range result.Chunks {
 					if chunk.Err != nil {
 						t.Fatal(chunk.Err)
@@ -67,7 +67,7 @@ func TestGeminiResponsesUnspecifiedFinishWaitsForNativeTerminal(t *testing.T) {
 						if !strings.HasPrefix(line, "data: ") {
 							continue
 						}
-						event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+						event := ojson.Parse(strings.TrimPrefix(line, "data: "))
 						switch event.Get("type").String() {
 						case "response.completed", "response.failed", "response.incomplete":
 							terminals = append(terminals, event)
@@ -95,7 +95,7 @@ func TestGeminiResponsesUnspecifiedFinishWaitsForNativeTerminal(t *testing.T) {
 					for _, item := range terminal.Get("response.output").Array() {
 						if item.Get("type").String() == "function_call" {
 							found++
-							if item.Get("name").String() != "synthetic_lookup" || gjson.Get(item.Get("arguments").String(), "key").String() != "fixture" {
+							if item.Get("name").String() != "synthetic_lookup" || ojson.Get(item.Get("arguments").String(), "key").String() != "fixture" {
 								t.Error("tool identity or arguments changed")
 							}
 						}

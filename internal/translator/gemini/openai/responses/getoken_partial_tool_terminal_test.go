@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // New upstream partialArgs tool search must retain the local terminal and metering contract.
@@ -16,7 +16,7 @@ func TestPartialToolSearchPreservesTerminalAndLateUsage(t *testing.T) {
 	} {
 		t.Run(tc.finish, func(t *testing.T) {
 			var state any
-			var events []gjson.Result
+			var events []ojson.Result
 			consume := func(raw string) {
 				for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-4-argon", []byte(toolSearchFixtureRequest), nil, []byte(raw), &state) {
 					_, event := parseSSEEvent(t, chunk)

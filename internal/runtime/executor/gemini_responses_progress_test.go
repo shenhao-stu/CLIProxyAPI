@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const progressThought = `{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"synthetic thought"}]}}]}`
@@ -155,7 +155,7 @@ func TestGeminiResponsesProgressKeepsTerminalUsage(t *testing.T) {
 					if !strings.HasPrefix(line, "data: ") {
 						continue
 					}
-					root := gjson.Parse(strings.TrimPrefix(line, "data: "))
+					root := ojson.Parse(strings.TrimPrefix(line, "data: "))
 					if root.Get("type").String() == "response.completed" {
 						terminals++
 						if got := root.Get("response.usage"); got.Get("input_tokens").Int() != 10 || got.Get("output_tokens").Int() != 7 || got.Get("total_tokens").Int() != 17 {

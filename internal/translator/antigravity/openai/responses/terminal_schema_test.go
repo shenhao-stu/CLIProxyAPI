@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestAntigravityFailedResponseItemStatus(t *testing.T) {
@@ -18,7 +18,7 @@ func TestAntigravityFailedResponseItemStatus(t *testing.T) {
 			t.Run(reason+"/"+part.kind, func(t *testing.T) {
 				request := []byte(`{"tools":[{"type":"tool_search","execution":"client"}]}`)
 				raw := []byte(fmt.Sprintf(`{"response":{"candidates":[{"content":{"parts":[%s]},"finishReason":%q}],"usageMetadata":{"promptTokenCount":19,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":7,"totalTokenCount":24}}}`, part.body, reason))
-				check := func(t *testing.T, item gjson.Result) {
+				check := func(t *testing.T, item ojson.Result) {
 					if item.Get("type").String() == part.kind {
 						if got := item.Get("status").String(); got != "completed" && got != "incomplete" && got != "in_progress" {
 							t.Errorf("item status %q is outside the Responses schema", got)
@@ -26,7 +26,7 @@ func TestAntigravityFailedResponseItemStatus(t *testing.T) {
 					}
 				}
 				t.Run("buffered", func(t *testing.T) {
-					final := gjson.ParseBytes(ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", request, nil, raw, nil))
+					final := ojson.ParseBytes(ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", request, nil, raw, nil))
 					if final.Get("status").String() != "failed" || len(final.Get("output").Array()) != 1 {
 						t.Fatalf("failed response lost its partial item: %s", final.Raw)
 					}
@@ -44,7 +44,7 @@ func TestAntigravityFailedResponseItemStatus(t *testing.T) {
 								if !strings.HasPrefix(l, "data:") {
 									continue
 								}
-								e := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(l, "data:")))
+								e := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(l, "data:")))
 								check(t, e.Get("item"))
 								if e.Get("type").String() == "response.failed" {
 									terminals++

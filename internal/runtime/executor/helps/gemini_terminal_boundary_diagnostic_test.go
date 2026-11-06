@@ -6,19 +6,19 @@ import (
 	"io"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	responses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 )
 
 type boundaryPipeline struct {
 	state     any
 	progress  helps.GeminiResponsesProgress
 	meter     helps.StreamUsageBuffer
-	terminals []gjson.Result
+	terminals []ojson.Result
 }
 
 func newBoundaryPipeline() *boundaryPipeline {
@@ -27,7 +27,7 @@ func newBoundaryPipeline() *boundaryPipeline {
 
 // This is the real executor's raw-accounting -> filter -> translator -> progress order.
 // synthEOF is distinct from an actual upstream [DONE] frame.
-func (p *boundaryPipeline) feed(raw string, synthEOF bool) []gjson.Result {
+func (p *boundaryPipeline) feed(raw string, synthEOF bool) []ojson.Result {
 	var original []byte
 	payload := []byte("[DONE]")
 	if !synthEOF {
@@ -37,10 +37,10 @@ func (p *boundaryPipeline) feed(raw string, synthEOF bool) []gjson.Result {
 	}
 	chunks := responses.ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-4-argon", nil, nil, payload, &p.state)
 	chunks = p.progress.Forward(original, chunks)
-	var result []gjson.Result
+	var result []ojson.Result
 	for _, c := range chunks {
 		for _, line := range bytes.Split(c, []byte("\n")) {
-			v := gjson.ParseBytes(helps.JSONPayload(line))
+			v := ojson.ParseBytes(helps.JSONPayload(line))
 			switch v.Get("type").String() {
 			case "response.completed", "response.failed", "response.incomplete":
 				result = append(result, v)

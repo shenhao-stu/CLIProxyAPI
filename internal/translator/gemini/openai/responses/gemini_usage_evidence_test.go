@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiUsageEvidence(t *testing.T) {
@@ -54,11 +54,11 @@ func TestGeminiUsageEvidence(t *testing.T) {
 						raw += `,"` + field + `":` + tc.metadata
 					}
 					raw += `}`
-					var response gjson.Result
+					var response ojson.Result
 					if stream {
 						response = completedGeminiMeteringResponse(t, raw, "[DONE]")
 					} else {
-						response = gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil))
+						response = ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil))
 					}
 					if got := response.Get("usage").Exists(); got != tc.present {
 						t.Fatalf("usage present=%t, want=%t: %s", got, tc.present, response.Get("usage").Raw)
@@ -109,8 +109,8 @@ func TestGeminiUsageEvidenceDuplicateMetadata(t *testing.T) {
 	for _, field := range []string{"usageMetadata", "cpaUsageMetadata"} {
 		raw := `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]},"finishReason":"STOP"}],"` + field + `":{"promptTokenCount":0,"candidatesTokenCount":0},"` + field + `":{"promptTokenCount":100,"candidatesTokenCount":1}}`
 		t.Run(field, func(t *testing.T) {
-			responses := []gjson.Result{
-				gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
+			responses := []ojson.Result{
+				ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
 				completedGeminiMeteringResponse(t, raw, "[DONE]"),
 			}
 			for _, response := range responses {
@@ -197,7 +197,7 @@ func TestGeminiUsageEvidenceTerminalCacheCorrection(t *testing.T) {
 	for _, cached := range []string{"0", "30"} {
 		t.Run("nonstream_cache_"+cached, func(t *testing.T) {
 			raw := `{"candidates":[{"content":{"parts":[{"text":"synthetic answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":15,"totalTokenCount":115,"cachedContentTokenCount":` + cached + `}}`
-			response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil))
+			response := ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil))
 			if response.Get("usage.input_tokens_details.cached_tokens").Raw != cached || response.Get("usage.input_tokens").Int() != 100 || response.Get("usage.output_tokens").Int() != 15 {
 				t.Fatal("nonstream terminal usage changed")
 			}
@@ -229,17 +229,17 @@ func TestGeminiUsageEvidenceInitialZeroNeedsSourceFinish(t *testing.T) {
 		}
 	})
 	t.Run("nonstream_final_body", func(t *testing.T) {
-		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(initial), nil))
+		response := ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(initial), nil))
 		if !response.Get("usage").Exists() || response.Get("usage.total_tokens").Int() != 0 {
 			t.Fatal("complete zero usage in final nonstream body was lost")
 		}
 	})
 }
 
-func completedGeminiMeteringResponse(t *testing.T, frames ...string) gjson.Result {
+func completedGeminiMeteringResponse(t *testing.T, frames ...string) ojson.Result {
 	t.Helper()
 	var state any
-	var result gjson.Result
+	var result ojson.Result
 	count := 0
 	for _, frame := range frames {
 		chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-4-argon", nil, nil, []byte(frame), &state)
@@ -248,7 +248,7 @@ func completedGeminiMeteringResponse(t *testing.T, frames ...string) gjson.Resul
 				if !strings.HasPrefix(line, "data:") {
 					continue
 				}
-				event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+				event := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 				if event.Get("type").String() == "response.completed" {
 					result = event.Get("response")
 					count++

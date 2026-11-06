@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // GeminiResponsesProgress preserves transport activity hidden by translation.
@@ -36,7 +36,7 @@ func (p *GeminiResponsesProgress) Forward(raw []byte, chunks [][]byte) [][]byte 
 	active := p.observe(raw)
 	for _, chunk := range chunks {
 		for _, line := range bytes.Split(chunk, []byte("\n")) {
-			kind := gjson.GetBytes(JSONPayload(line), "type").String()
+			kind := ojson.GetBytes(JSONPayload(line), "type").String()
 			if strings.HasPrefix(kind, "response.") {
 				p.started = true
 			}
@@ -64,10 +64,10 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		return true
 	}
 	payload := JSONPayload(raw)
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return false
 	}
-	root := gjson.ParseBytes(payload)
+	root := ojson.ParseBytes(payload)
 	if response := root.Get("response"); response.IsObject() {
 		root = response
 	}
@@ -81,10 +81,10 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 	active := false
 	parts := root.Get("candidates.0.content.parts")
 	if !parts.IsArray() {
-		parts = gjson.Result{}
+		parts = ojson.Result{}
 	}
-	parts.ForEach(func(_, part gjson.Result) bool {
-		if value := part.Get("text"); value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+	parts.ForEach(func(_, part ojson.Result) bool {
+		if value := part.Get("text"); value.Type == ojson.String && strings.TrimSpace(value.String()) != "" {
 			if part.Get("thought").Bool() {
 				p.nativeThought = true
 			} else {
@@ -94,16 +94,16 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		p.nativeTool = p.nativeTool || part.Get("functionCall").IsObject()
 		p.nativeOther = p.nativeOther || part.Get("inlineData").IsObject() || part.Get("executableCode").IsObject() || part.Get("codeExecutionResult").IsObject()
 		for _, key := range []string{"text", "thoughtSignature", "thought_signature"} {
-			if value := part.Get(key); value.Type == gjson.String && value.String() != "" {
+			if value := part.Get(key); value.Type == ojson.String && value.String() != "" {
 				active = true
 			}
 		}
-		if value := part.Get("functionCall"); value.IsObject() && value.Get("name").Type == gjson.String && value.Get("name").String() != "" {
+		if value := part.Get("functionCall"); value.IsObject() && value.Get("name").Type == ojson.String && value.Get("name").String() != "" {
 			active = true
 		}
 		return true
 	})
-	if finish := root.Get("candidates.0.finishReason"); finish.Type == gjson.String {
+	if finish := root.Get("candidates.0.finishReason"); finish.Type == ojson.String {
 		reason := strings.TrimSpace(finish.String())
 		if reason != "" && !strings.EqualFold(reason, "FINISH_REASON_UNSPECIFIED") {
 			p.sourceFinished = true
@@ -115,7 +115,7 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		if !root.Get("usageMetadata").Exists() {
 			value = root.Get("cpaUsageMetadata." + key)
 		}
-		if value.Type != gjson.Number {
+		if value.Type != ojson.Number {
 			continue
 		}
 		count, err := strconv.ParseInt(value.Raw, 10, 64)

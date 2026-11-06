@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiPartialMeterDoesNotInventCounters(t *testing.T) {
@@ -20,9 +20,9 @@ func TestGeminiPartialMeterDoesNotInventCounters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := `{"candidates":[{"content":{"parts":[{"text":"synthetic"}]},"finishReason":"STOP"}],"usageMetadata":` + tc.meter + `}`
-			for _, response := range []gjson.Result{
+			for _, response := range []ojson.Result{
 				completedGeminiMeteringResponse(t, raw, "[DONE]"),
-				gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
+				ojson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-4-argon", nil, nil, []byte(raw), nil)),
 			} {
 				if response.Get("usage." + tc.absent).Exists() {
 					t.Errorf("missing native %s became a fabricated counter: %s", tc.absent, response.Get("usage").Raw)
