@@ -2309,10 +2309,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
 			opts.Stream = false
 			resp, errExec := executor.Execute(execCtx, auth, req, opts)
-			rerrExec := resultErrorFromError(errExec)
-			if rerrExec != nil {
-				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
-			}
+			rerrExec := verificationResultError(provider, errExec)
 			if errExec != nil {
 				m.MarkResult(execCtx, Result{
 					AuthID:            auth.ID,
@@ -2359,9 +2356,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 			}
 			return updated, nil
 		}
-		if rerr != nil {
-			rerr.Message = sanitizeRenewalMessage(rerr.Message)
-		}
+		rerr = verificationResultError(provider, errStream)
 		m.MarkResult(execCtx, Result{
 			AuthID:            auth.ID,
 			Provider:          provider,
@@ -2404,10 +2399,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		}
 	}
 	if chunkErr != nil {
-		rerrChunk := resultErrorFromError(chunkErr)
-		if rerrChunk != nil {
-			rerrChunk.Message = sanitizeRenewalMessage(rerrChunk.Message)
-		}
+		rerrChunk := verificationResultError(provider, chunkErr)
 		m.MarkResult(execCtx, Result{
 			AuthID:            auth.ID,
 			Provider:          provider,

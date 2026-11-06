@@ -1839,10 +1839,10 @@ func CanonicalSessionID(headers http.Header, payload []byte, metadata map[string
 //  3. Session-Id / Session_id (Codex and compatible clients)
 //  4. X-Session-ID
 //  5. X-Session-Affinity (OpenCode)
-//  6. X-Client-Request-Id (pi Responses)
-//  7. session_id / sessionId
-//  8. prompt_cache_key, with conversation / conversation.id as an alias
-//  9. metadata.user_id and conversation_id legacy body fields
+//  6. session_id / sessionId
+//  7. prompt_cache_key, with conversation / conversation.id as an alias
+//  8. metadata.user_id and conversation_id legacy body fields
+//  9. X-Client-Request-Id fallback (pi Responses)
 //  10. explicit execution session metadata
 //  11. stable context-derived session identity
 //  12. stable hash from initial message content
