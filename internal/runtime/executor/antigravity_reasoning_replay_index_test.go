@@ -806,8 +806,20 @@ func TestAntigravityReplayMergeRandomizedDifferential(t *testing.T) {
 			}
 		}
 
-		wantPayload, wantChanged := legacyApplyAntigravityReasoningReplayItems(payload, items, nil)
-		gotPayload, gotChanged := applyAntigravityReasoningReplayItems(payload, items, nil)
+		// Cross-history text-signature replay is intentionally no longer allowed.
+		// Leave the frozen oracle unchanged and compare its compatible domain.
+		// TestThoughtSignatureReplayRequiresMatchingHistory pins the new boundary.
+		compatibleItems := make([][]byte, 0, len(items))
+		for _, item := range items {
+			entry := ojson.ParseBytes(item)
+			if entry.Get("type").String() == "thought_signature" &&
+				!legacyAntigravityReplayItemContextMatches(payload, entry, int(entry.Get("contentIndex").Int())) {
+				continue
+			}
+			compatibleItems = append(compatibleItems, item)
+		}
+		wantPayload, wantChanged := legacyApplyAntigravityReasoningReplayItems(payload, compatibleItems, nil)
+		gotPayload, gotChanged := applyAntigravityReasoningReplayItems(payload, compatibleItems, nil)
 		if gotChanged != wantChanged {
 			t.Fatalf("seed=%d case=%d changed=%t want=%t", randomSeed, caseIndex, gotChanged, wantChanged)
 		}
