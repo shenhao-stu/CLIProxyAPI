@@ -15,10 +15,11 @@ func TestThoughtSignatureReplayRequiresMatchingHistory(t *testing.T) {
 	item = antigravityReplayItemContextHashForTest(item, original, 1)
 	for _, path := range []string{"request.contents.0.parts.0.text", "request.systemInstruction.parts.0.text"} {
 		t.Run(path, func(t *testing.T) {
-			changed, err := ojson.SetBytes(original, path, "different tenant context")
-			if err != nil {
-				t.Fatal(err)
+			doc := ojson.NewDoc(original)
+			if errSet := doc.Set(path, "different tenant context"); errSet != nil {
+				t.Fatal(errSet)
 			}
+			changed := doc.Bytes()
 			for _, engine := range []struct {
 				name  string
 				apply func([]byte, [][]byte, map[string]any) ([]byte, bool)
@@ -50,8 +51,14 @@ func TestThoughtSignatureContextGuardPreservesClientState(t *testing.T) {
 	original := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"original"}]},{"role":"model","parts":[{"text":"OK"}]}]}}`)
 	kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"OK"}`))
 	item := antigravityReplayItemContextHashForTest(buildAntigravityThoughtSignatureItem(1, 0, "cached-old-state", kind, fingerprint), original, 1)
-	changed, _ := ojson.SetBytes(original, "request.contents.0.parts.0.text", "changed")
-	changed, _ = ojson.SetBytes(changed, "request.contents.1.parts.0.thoughtSignature", "client-carried-native-state")
+	doc := ojson.NewDoc(original)
+	if errSet := doc.Set("request.contents.0.parts.0.text", "changed"); errSet != nil {
+		t.Fatal(errSet)
+	}
+	if errSet := doc.Set("request.contents.1.parts.0.thoughtSignature", "client-carried-native-state"); errSet != nil {
+		t.Fatal(errSet)
+	}
+	changed := doc.Bytes()
 	out, applied := applyAntigravityReasoningReplayItems(changed, [][]byte{item}, nil)
 	if applied || !bytes.Equal(out, changed) {
 		t.Fatal("context guard changed client-carried state")
