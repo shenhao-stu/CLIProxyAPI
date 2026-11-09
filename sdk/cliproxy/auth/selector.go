@@ -940,7 +940,7 @@ const (
 	// SessionAffinityRebindOnAny rebinds the session on any credential-attributed failure (default).
 	SessionAffinityRebindOnAny = "any"
 	// SessionAffinityRebindOnQuota preserves the existing session binding across transient failures
-	// and only rebinds on quota, auth, model-support, or permanent unavailability.
+	// and only rebinds on quota, verified model capacity, auth, model-support, or permanent unavailability.
 	SessionAffinityRebindOnQuota = "quota"
 )
 
@@ -977,7 +977,7 @@ func shouldRebindSessionAffinityOnError(err *Error) bool {
 	if err == nil || shouldSkipCredentialCooldown(err) {
 		return false
 	}
-	if isModelSupportResultError(err) || isCloudflareChallengeResultError(err) || isInvalidGrantResultError(err) || isCreditBalanceTooLowResultError(err) {
+	if isModelCapacityResultError(err) || isModelSupportResultError(err) || isCloudflareChallengeResultError(err) || isInvalidGrantResultError(err) || isCreditBalanceTooLowResultError(err) {
 		return true
 	}
 	switch statusCodeFromResult(err) {
