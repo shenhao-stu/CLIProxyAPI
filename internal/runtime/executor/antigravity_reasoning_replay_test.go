@@ -1041,7 +1041,7 @@ func TestAntigravityReasoningReplayDoesNotCommitPartialResponse(t *testing.T) {
 	}
 }
 
-func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift(t *testing.T) {
+func TestPrepareAntigravityGeminiReasoningReplayRejectsTextSignatureOnContextDrift(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
@@ -1056,11 +1056,9 @@ func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	// The signed part itself is byte-identical, so the signature still describes
-	// it exactly. Only the surrounding turns drifted, which Gemini does not bind
-	// signatures to, so dropping it here would only force needless re-reasoning.
-	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "fingerprinted-signature-123456" {
-		t.Fatalf("signature = %q, want the signature replayed even though the surrounding context drifted; body=%s", got, out)
+	// Identical visible text does not prove ownership of encrypted reasoning.
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "" {
+		t.Fatalf("different history received cached signature %q", got)
 	}
 }
 

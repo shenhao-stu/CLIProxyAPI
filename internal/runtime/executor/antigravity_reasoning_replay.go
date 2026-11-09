@@ -1273,19 +1273,15 @@ func (i *antigravityReplayRequestIndex) functionCallProvenanceLocation(
 // to. It is the single locator shared by the eligibility check and the write
 // path, so the two can never disagree about the target part.
 //
-// A target hash pins the signature to a part whose own bytes are unchanged,
-// which is all Gemini validates: the signature's own integrity, never its
-// binding to the surrounding history. Drift elsewhere in the conversation
-// therefore costs this signature nothing, so it is deliberately not gated on
-// the context fingerprint. The positional fallback below has no such proof and
-// stays gated.
+// Encrypted reasoning belongs to the preceding history as well as the signed
+// part. Identical visible text alone cannot authorize a cached signature replay.
 func (i *antigravityReplayRequestIndex) thoughtSignaturePartIndex(itemResult ojson.Result) (contentIndex int, partIndex int, ok bool) {
 	contentIndex = int(itemResult.Get("contentIndex").Int())
 	if i == nil || contentIndex < 0 || contentIndex >= len(i.contents) {
 		return -1, -1, false
 	}
 	content := i.contents[contentIndex]
-	if !strings.EqualFold(strings.TrimSpace(content.content.Get("role").String()), "model") {
+	if !strings.EqualFold(strings.TrimSpace(content.content.Get("role").String()), "model") || !i.contextMatches(itemResult, contentIndex) {
 		return -1, -1, false
 	}
 	parts := content.parts
