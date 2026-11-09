@@ -23,6 +23,10 @@ type GeminiResponsesProgress struct {
 	usage                      [5]int64
 	seenUsage                  uint8
 	emitted                    uint64
+	nativeFrames, nativeParts  uint64
+	nativeSignature, emptyText bool
+	promptBlocked              bool
+	incompleteFrameBytes       int
 }
 
 func NewGeminiResponsesProgress(model string, format sdktranslator.Format) GeminiResponsesProgress {
@@ -74,6 +78,8 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 	if !root.IsObject() {
 		return false
 	}
+	p.nativeFrames++
+	p.promptBlocked = p.promptBlocked || root.Get("promptFeedback.blockReason").Exists()
 	if root.Get("error").Exists() {
 		p.sourceFinished = true
 		return false
@@ -84,6 +90,9 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		parts = ojson.Result{}
 	}
 	parts.ForEach(func(_, part ojson.Result) bool {
+		p.nativeParts++
+		p.nativeSignature = p.nativeSignature || part.Get("thoughtSignature").String() != "" || part.Get("thought_signature").String() != ""
+		p.emptyText = p.emptyText || (part.Get("text").Type == ojson.String && strings.TrimSpace(part.Get("text").String()) == "")
 		if value := part.Get("text"); value.Type == ojson.String && strings.TrimSpace(value.String()) != "" {
 			if part.Get("thought").Bool() {
 				p.nativeThought = true
@@ -148,6 +157,10 @@ func (p *GeminiResponsesProgress) Forwarded(chunk []byte) {
 	}
 }
 
+func (p *GeminiResponsesProgress) IncompleteFrame(size int) {
+	p.incompleteFrameBytes = size
+}
+
 func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error) {
 	if !p.enabled {
 		return
@@ -184,5 +197,11 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 		"native_usage_fields_seen": p.seenUsage,
 		"context_canceled":         ctx.Err() != nil,
 		"outcome":                  outcome,
+		"native_frame_count":       p.nativeFrames,
+		"native_part_count":        p.nativeParts,
+		"native_signature_seen":    p.nativeSignature,
+		"native_empty_text_seen":   p.emptyText,
+		"native_prompt_blocked":    p.promptBlocked,
+		"incomplete_frame_bytes":   p.incompleteFrameBytes,
 	}).Info("gemini responses transport activity summary")
 }

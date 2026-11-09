@@ -1819,7 +1819,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		if st.Usage.Present {
 			_ = completedDoc.SetRawBytes("response.usage", st.Usage.ResponsesJSON())
 		}
-		if status == "completed" && len(outputs) == 0 {
+		if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs) {
 			eventType, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
 			_ = completedDoc.Set("type", eventType)
 			_ = completedDoc.Set("response.status", status)
@@ -2347,13 +2347,38 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	if usage.Merge(root, true) {
 		_ = respDoc.SetRawBytes("usage", usage.ResponsesJSON())
 	}
-	if status == "completed" && len(outputs) == 0 {
+	if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs) {
 		_, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
 		_ = respDoc.Set("status", status)
 		_ = respDoc.SetRawBytes("error", terminalError)
 	}
 
 	return respDoc.Bytes()
+}
+
+// Opaque replay signatures preserve context; they do not constitute an answer.
+func geminiResponsesHasDeliverableOutput(outputs [][]byte) bool {
+	for _, raw := range outputs {
+		item := ojson.ParseBytes(raw)
+		switch item.Get("type").String() {
+		case "message":
+			for _, part := range item.Get("content").Array() {
+				if strings.TrimSpace(part.Get("text").String()) != "" || strings.TrimSpace(part.Get("refusal").String()) != "" {
+					return true
+				}
+			}
+		case "reasoning":
+			for _, part := range item.Get("summary").Array() {
+				if strings.TrimSpace(part.Get("text").String()) != "" {
+					return true
+				}
+			}
+		default:
+			// Other items are validated tool or search outputs built above.
+			return true
+		}
+	}
+	return false
 }
 
 // Full snapshots are evidence, never source prefixes. Stable IDs and explicit

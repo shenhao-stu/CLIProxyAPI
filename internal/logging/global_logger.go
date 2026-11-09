@@ -62,6 +62,7 @@ var logFieldOrder = []string{
 	"emitted_progress_count", "responses_started", "native_terminal_seen",
 	"native_finish_reason", "native_text_seen", "native_thought_seen", "native_tool_seen", "native_other_output_seen",
 	"translated_terminal_seen", "native_usage_fields_seen", "context_canceled", "outcome",
+	"native_frame_count", "native_part_count", "native_signature_seen", "native_empty_text_seen", "native_prompt_blocked", "incomplete_frame_bytes",
 	"media_session_id", "call_id", "peer", "state", "reason",
 }
 

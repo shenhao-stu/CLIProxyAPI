@@ -461,6 +461,16 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				return
 			}
 		}
+		if len(pendingJSON) != 0 && scanner.Err() == nil && ctx.Err() == nil {
+			progress.IncompleteFrame(len(pendingJSON))
+			streamErr = statusErr{code: http.StatusBadGateway, msg: "Upstream ended inside an incomplete stream frame"}
+			stopDeliverySupport()
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+			return
+		}
 		if pendingFilterMsg != "" && scanner.Err() == nil && !terminalDelivered {
 			streamErr = statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
 			stopDeliverySupport()

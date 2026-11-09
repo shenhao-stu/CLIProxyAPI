@@ -897,6 +897,9 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesMultipleLeadingEmptySig
 	for _, chunk := range streamEvents {
 		event, data := parseSSEEvent(t, chunk)
 		if event == "response.completed" {
+			t.Fatal("opaque signatures alone must not report a completed answer")
+		}
+		if event == "response.failed" {
 			completed = data.Get("response.output")
 		}
 	}
