@@ -194,7 +194,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = e.newStatusErr(auth, baseModel, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return nil, err
 	}
 
@@ -346,7 +346,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
 				}
-				streamErr = newAntigravityStatusErr(statusCode, payload)
+				streamErr = e.newStatusErr(auth, baseModel, statusCode, resp.Header, payload)
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {

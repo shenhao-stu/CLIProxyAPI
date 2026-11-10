@@ -355,12 +355,31 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+func (e *AntigravityExecutor) newStatusErr(auth *cliproxyauth.Auth, model string, statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
-	if statusCode == http.StatusTooManyRequests {
-		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
-			err.retryAfter = retryAfter
-		}
+	if statusCode != http.StatusTooManyRequests {
+		return err
+	}
+	if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
+		err.retryAfter = retryAfter
+		return err
+	}
+	if auth == nil || auth.Prefix != "ultra" || !strings.HasPrefix(model, "gemini-") {
+		return err
+	}
+	upstream := ojson.GetBytesNoCopy(body, "error")
+	if upstream.Get("code").Int() != http.StatusTooManyRequests ||
+		upstream.Get("status").String() != "RESOURCE_EXHAUSTED" ||
+		upstream.Get("message").String() != "Resource has been exhausted (e.g. check quota)." ||
+		upstream.Get("details").Exists() {
+		return err
+	}
+	err.retryAfter = parseRetryAfterHeader(headers, time.Now())
+	if err.retryAfter == nil && !antigravityCoolingDisabled(auth, e.cfg) {
+		// Google did not specify a reset time. Give this model on this auth
+		// a short local cooldown to avoid rotating through the same pool.
+		cooldown := 30 * time.Second
+		err.retryAfter = &cooldown
 	}
 	return err
 }
