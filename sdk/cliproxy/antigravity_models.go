@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -492,12 +493,29 @@ func (s *Service) antigravityHomeEnabled() bool {
 }
 
 func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
+	const carbonHigh = "gemini-4-carbon-high"
+	const carbonLow = "gemini-4-carbon-low"
+
 	filtered := make([]*ModelInfo, 0, len(models))
+	_, lowEntitled := hints.ModelIDs[carbonLow]
+	lowDefined := lowEntitled && slices.ContainsFunc(models, func(model *ModelInfo) bool {
+		return model != nil && normalizeAntigravityFetchedModelID(model.ID) == carbonLow
+	})
 	for _, model := range models {
-		if model != nil {
-			if _, ok := hints.ModelIDs[normalizeAntigravityFetchedModelID(model.ID)]; ok {
-				filtered = append(filtered, model)
-			}
+		if model == nil {
+			continue
+		}
+		id := normalizeAntigravityFetchedModelID(model.ID)
+		if _, ok := hints.ModelIDs[id]; ok {
+			filtered = append(filtered, model)
+		}
+		// Derive metadata from the catalog's high variant only for an account
+		// whose Google catalog explicitly grants the low model ID.
+		if id == carbonHigh && lowEntitled && !lowDefined {
+			low := *model
+			low.ID, low.Name = carbonLow, carbonLow
+			low.Description = "Gemini 4 Carbon (Low)"
+			filtered = append(filtered, &low)
 		}
 	}
 	return filtered
