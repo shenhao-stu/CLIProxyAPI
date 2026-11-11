@@ -214,7 +214,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				log.Errorf("antigravity executor: close response line error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(resp.Body)
+		idleTimeout := antigravityCarbonReadTimeout(auth, baseModel, responseFormat)
+		body := &antigravityIdleStream{ReadCloser: resp.Body}
+		scanner := bufio.NewScanner(body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var streamUsage helps.StreamUsageBuffer
@@ -430,6 +432,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 						return false
 					}
 				}
+				if len(chunks) > 0 {
+					body.timeout = idleTimeout
+				}
 				if isTerminalChunk {
 					terminalDelivered = true
 				}
@@ -465,7 +470,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			return
 		}
-		if pendingFilterMsg != "" && scanner.Err() == nil && !terminalDelivered {
+		scanErr := scanner.Err()
+		if pendingFilterMsg != "" && !terminalDelivered &&
+			(scanErr == nil || errors.Is(scanErr, errAntigravityStreamIdle) && ctx.Err() == nil) {
+			progress.FilterRejected(http.StatusBadRequest)
 			streamErr = statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
 			stopDeliverySupport()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
@@ -478,7 +486,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := scanErr; errScan != nil {
+			if terminalDelivered && errors.Is(errScan, errAntigravityStreamIdle) {
+				return
+			}
+			errScan = classifyAntigravityCarbonReadError(ctx, errScan)
 			streamErr = errScan
 			if errors.Is(errScan, context.Canceled) && ctx.Err() != nil {
 				if terminalDelivered {

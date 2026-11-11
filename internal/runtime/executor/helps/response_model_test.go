@@ -478,3 +478,30 @@ func TestExtractResponseModelClonesFromReusableBuffer(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageReporterRecognizesAntigravityTierAlias(t *testing.T) {
+	for _, tc := range []struct {
+		provider, request, served string
+		warnings                  int
+	}{
+		{"antigravity", "ultra/gemini-4-carbon-low", "gemini-4-carbon", 0},
+		{"antigravity", "gemini-4-argon-high", "gemini-4-argon", 0},
+		{"antigravity", "gemini-3.8-flash-high", "gemini-3.8-flash", 0},
+		{"antigravity", "gemini-4-carbon-high", "gemini-4-carbon-low", 1},
+		{"antigravity", "gemini-4-carbon-low", "gemini-4-argon", 1},
+		{"gemini", "gemini-4-carbon-low", "gemini-4-carbon", 1},
+	} {
+		t.Run(tc.provider+"/"+tc.request+"/"+tc.served, func(t *testing.T) {
+			hook := setupResponseModelLoggerHook(t)
+			reporter := &UsageReporter{provider: tc.provider, model: tc.request}
+			reporter.SetResponseModel(tc.served)
+			reporter.warnModelSubstitution(context.Background())
+			if got := len(substitutionWarnings(hook)); got != tc.warnings {
+				t.Fatalf("substitution warnings = %d, want %d", got, tc.warnings)
+			}
+			if got := reporter.ResponseModel(); got != tc.served {
+				t.Fatalf("recorded model changed to %q", got)
+			}
+		})
+	}
+}

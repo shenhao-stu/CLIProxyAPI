@@ -294,6 +294,19 @@ func IsModelSubstituted(requested, served string) bool {
 	return true
 }
 
+// Antigravity reports the base model in modelVersion even when it accepts a
+// tiered model ID. Compare the direction and both IDs to keep real swaps visible.
+func isAntigravityGeminiTierAlias(requested, served string) bool {
+	requested = stripModelProviderPrefix(normalizeModelName(requested))
+	served = stripModelProviderPrefix(normalizeModelName(served))
+	switch served {
+	case "gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash":
+		return requested == served+"-low" || requested == served+"-medium" || requested == served+"-high"
+	default:
+		return false
+	}
+}
+
 func isDatedModelAlias(base, dated string) bool {
 	prefix := base + "-"
 	if !strings.HasPrefix(dated, prefix) {

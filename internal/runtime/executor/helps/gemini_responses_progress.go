@@ -27,6 +27,8 @@ type GeminiResponsesProgress struct {
 	nativeSignature, emptyText bool
 	promptBlocked              bool
 	incompleteFrameBytes       int
+	nativeErrorStatus          int
+	nativeFilter               bool
 }
 
 func NewGeminiResponsesProgress(model string, format sdktranslator.Format) GeminiResponsesProgress {
@@ -80,7 +82,8 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 	}
 	p.nativeFrames++
 	p.promptBlocked = p.promptBlocked || root.Get("promptFeedback.blockReason").Exists()
-	if root.Get("error").Exists() {
+	if errFrame := root.Get("error"); errFrame.Exists() {
+		p.nativeErrorStatus = int(errFrame.Get("code").Int())
 		p.sourceFinished = true
 		return false
 	}
@@ -157,6 +160,15 @@ func (p *GeminiResponsesProgress) Forwarded(chunk []byte) {
 	}
 }
 
+// FilterRejected records a verified native filter notice at stream end.
+func (p *GeminiResponsesProgress) FilterRejected(status int) {
+	if p.enabled {
+		p.nativeErrorStatus = status
+		p.nativeFilter = true
+		p.sourceFinished = true
+	}
+}
+
 func (p *GeminiResponsesProgress) IncompleteFrame(size int) {
 	p.incompleteFrameBytes = size
 }
@@ -177,6 +189,8 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 		return
 	}
 	switch {
+	case p.nativeErrorStatus >= 400:
+		outcome = "upstream_error"
 	case errors.Is(err, context.DeadlineExceeded):
 		outcome = "deadline"
 	case errors.Is(err, context.Canceled):
@@ -202,6 +216,8 @@ func (p *GeminiResponsesProgress) LogOutcome(ctx context.Context, readErr error)
 		"native_signature_seen":    p.nativeSignature,
 		"native_empty_text_seen":   p.emptyText,
 		"native_prompt_blocked":    p.promptBlocked,
+		"native_error_status":      p.nativeErrorStatus,
+		"native_filter_notice":     p.nativeFilter,
 		"incomplete_frame_bytes":   p.incompleteFrameBytes,
 	}).Info("gemini responses transport activity summary")
 }

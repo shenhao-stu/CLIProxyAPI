@@ -319,6 +319,9 @@ func (r *UsageReporter) warnModelSubstitution(ctx context.Context) {
 	if r.model != "" && !IsModelSubstituted(r.model, served) {
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(r.provider), "antigravity") && isAntigravityGeminiTierAlias(expectedModel, served) {
+		return
+	}
 	providerName := strings.TrimSpace(r.provider)
 	if providerName == "" {
 		providerName = "unknown"

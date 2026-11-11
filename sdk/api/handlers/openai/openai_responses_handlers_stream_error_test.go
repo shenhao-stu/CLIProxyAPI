@@ -1182,3 +1182,16 @@ func TestResponsesSSEPayloadErrorMessage_ImageGenerationUserErrorMapsToBadReques
 		}
 	}
 }
+
+func TestResponsesGeminiFilterCarriesExplicit400AfterHeaders(t *testing.T) {
+	filter := errors.New("This request was blocked by Gemini's filters. See https://policies.google.com/terms/generative-ai/use-policy.")
+	errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: filter}
+	safe := sanitizeResponsesStreamErrorMessage(errMsg)
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(safe.StatusCode, responsesStreamErrorText(safe, safe.StatusCode), 2)
+	body := string(chunk)
+	for _, want := range []string{`"status_code":400`, `"code":"gemini_content_filter"`, `"type":"invalid_request_error"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+}

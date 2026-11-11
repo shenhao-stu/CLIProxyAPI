@@ -1351,6 +1351,16 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		text = strings.TrimSpace(errMsg.Error.Error())
 	}
+	// Gemini can reject a request after HTTP 200 and tool frames. Preserve
+	// the rejection status across gateways reading the terminal SSE event.
+	if status == http.StatusBadRequest && errMsg != nil && clienterror.IsGeminiFilterBlockError(errMsg.Error) {
+		detail, _ := json.Marshal(map[string]any{"error": map[string]any{
+			"type": "invalid_request_error", "code": "gemini_content_filter",
+			"message":     truncateResponsesStreamErrorText(redactResponsesStreamErrorText(text), responsesStreamErrorMessageLimit),
+			"status_code": status,
+		}})
+		return string(detail)
+	}
 	trimmed := strings.TrimSpace(text)
 	if !json.Valid([]byte(trimmed)) {
 		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
