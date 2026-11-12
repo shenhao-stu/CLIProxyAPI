@@ -40,18 +40,22 @@ func TestAntigravityArgonPreservesExplicitOutputLimit(t *testing.T) {
 	}
 }
 
-func TestAntigravityArgonOutputLimitAcrossProtocols(t *testing.T) {
+func TestAntigravityOutputLimitAcrossProtocols(t *testing.T) {
 	for _, tc := range []struct {
 		format sdktranslator.Format
+		model  string
 		body   string
+		limit  int64
 	}{
-		{sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"synthetic"}],"max_tokens":512}`},
-		{sdktranslator.FormatOpenAIResponse, `{"input":"synthetic","max_output_tokens":512}`},
-		{sdktranslator.FormatClaude, `{"messages":[{"role":"user","content":"synthetic"}],"max_tokens":512}`},
-		{sdktranslator.FormatGemini, `{"contents":[{"role":"user","parts":[{"text":"synthetic"}]}],"generationConfig":{"maxOutputTokens":512}}`},
+		{sdktranslator.FormatOpenAI, "gemini-4-argon-high", `{"messages":[{"role":"user","content":"synthetic"}],"max_tokens":512}`, 512},
+		{sdktranslator.FormatOpenAIResponse, "gemini-4-argon-high", `{"input":"synthetic","max_output_tokens":512}`, 512},
+		{sdktranslator.FormatClaude, "gemini-4-argon-high", `{"messages":[{"role":"user","content":"synthetic"}],"max_tokens":512}`, 512},
+		{sdktranslator.FormatGemini, "gemini-4-argon-high", `{"contents":[{"role":"user","parts":[{"text":"synthetic"}]}],"generationConfig":{"maxOutputTokens":512}}`, 512},
+		{sdktranslator.FormatOpenAI, "gemini-4-carbon-low", `{"messages":[{"role":"user","content":"synthetic"}],"max_tokens":32768}`, 32768},
+		{sdktranslator.FormatOpenAIResponse, "gemini-4-carbon-high", `{"input":"synthetic","max_output_tokens":32768}`, 32768},
 	} {
 		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%t", tc.format, stream), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.model, tc.format, stream), func(t *testing.T) {
 				observed := make(chan []byte, 1)
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					body, errRead := io.ReadAll(r.Body)
@@ -72,7 +76,7 @@ func TestAntigravityArgonOutputLimitAcrossProtocols(t *testing.T) {
 				auth := antigravityAuthWithIDAndProxy(t.Name(), "")
 				auth.Attributes = map[string]string{"base_url": server.URL}
 				e := NewAntigravityExecutor(&config.Config{})
-				req := cliproxyexecutor.Request{Model: "gemini-4-argon-high", Payload: []byte(tc.body)}
+				req := cliproxyexecutor.Request{Model: tc.model, Payload: []byte(tc.body)}
 				opts := cliproxyexecutor.Options{SourceFormat: tc.format, ResponseFormat: tc.format, Stream: stream}
 				if stream {
 					result, errExecute := e.ExecuteStream(ctx, auth, req, opts)
@@ -89,8 +93,8 @@ func TestAntigravityArgonOutputLimitAcrossProtocols(t *testing.T) {
 						t.Fatal(errExecute)
 					}
 				}
-				if got := ojson.GetBytes(<-observed, "request.generationConfig.maxOutputTokens"); got.Int() != 512 {
-					t.Fatalf("wire output limit = %s", got.Raw)
+				if got := ojson.GetBytes(<-observed, "request.generationConfig.maxOutputTokens"); got.Int() != tc.limit {
+					t.Fatalf("wire output limit = %q, want %d", got.Raw, tc.limit)
 				}
 			})
 		}
@@ -104,6 +108,7 @@ func TestAntigravityOutputLimitDoesNotAddDefaultsOrChangeOtherModels(t *testing.
 		want   string
 	}{
 		{"gemini-4-argon-high", `{}`, ""},
+		{"gemini-4-carbon-low", `{}`, ""},
 		{"gemini-3-pro-high", `{"maxOutputTokens":512}`, ""},
 		{"gemini-3-pro-image", `{"maxOutputTokens":512}`, ""},
 		{"claude-sonnet-5-5", `{"maxOutputTokens":512}`, "512"},

@@ -85,8 +85,8 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		if !promptStructuredOutput {
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
-	} else if !util.IsGeminiArgon(modelName) {
-		// Argon accepts explicit output budgets; retain the legacy cleanup for other models.
+	} else if !util.IsGeminiArgon(modelName) && !util.IsGeminiCarbon(modelName) {
+		// Keep explicit output budgets for supported models.
 		_ = doc.Delete("request.generationConfig.maxOutputTokens")
 	}
 

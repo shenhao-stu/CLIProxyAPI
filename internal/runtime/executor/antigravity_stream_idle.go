@@ -5,9 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -18,15 +18,10 @@ const antigravityCarbonReadIdleTimeout = 150 * time.Second
 var errAntigravityStreamIdle = errors.New("Antigravity upstream stream read timed out")
 
 func antigravityCarbonReadTimeout(auth *cliproxyauth.Auth, model string, format sdktranslator.Format) time.Duration {
-	if auth == nil || auth.Prefix != "ultra" || format != sdktranslator.FormatOpenAIResponse {
-		return 0
-	}
-	switch strings.ToLower(model) {
-	case "gemini-4-carbon", "gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high":
+	if auth != nil && auth.Prefix == "ultra" && format == sdktranslator.FormatOpenAIResponse && util.IsGeminiCarbon(model) {
 		return antigravityCarbonReadIdleTimeout
-	default:
-		return 0
 	}
+	return 0
 }
 
 // Bound each blocking upstream read. Time spent delivering a frame downstream
