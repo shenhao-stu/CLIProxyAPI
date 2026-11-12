@@ -170,8 +170,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
-	if optional && len(bytes.TrimSpace(data)) == 0 {
+	// A truncate/write save may briefly expose an empty file. Strict loads must
+	// keep the last valid runtime configuration instead of applying defaults.
+	if len(bytes.TrimSpace(data)) == 0 {
+		if !optional {
+			return nil, fmt.Errorf("config file is empty")
+		}
 		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
 		cfg.NormalizePluginsConfig()
 		cfg.NormalizeClaudeConfig()
@@ -263,6 +267,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
+
+	cfg.KVStore.Path = strings.TrimSpace(cfg.KVStore.Path)
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
