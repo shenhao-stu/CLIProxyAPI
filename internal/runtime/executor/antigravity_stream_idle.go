@@ -12,8 +12,11 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-// Finish upstream silence before the downstream gateway's 180 second deadline.
-const antigravityCarbonReadIdleTimeout = 150 * time.Second
+const (
+	antigravityCarbonReadIdleTimeout = 150 * time.Second
+	antigravityCarbonThoughtIdle     = 420 * time.Second
+	antigravityCarbonThoughtWindow   = 12 * time.Minute
+)
 
 var errAntigravityStreamIdle = errors.New("Antigravity upstream stream read timed out")
 
@@ -22,6 +25,13 @@ func antigravityCarbonReadTimeout(auth *cliproxyauth.Auth, model string, format 
 		return antigravityCarbonReadIdleTimeout
 	}
 	return 0
+}
+
+func antigravityCarbonReadBudget(base time.Duration, thinkingOnly bool, remaining time.Duration) time.Duration {
+	if base == 0 || !thinkingOnly {
+		return base
+	}
+	return max(base, min(antigravityCarbonThoughtIdle, remaining))
 }
 
 // Bound each blocking upstream read. Time spent delivering a frame downstream

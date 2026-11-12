@@ -215,6 +215,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 		}()
 		idleTimeout := antigravityCarbonReadTimeout(auth, baseModel, responseFormat)
+		thoughtWindowEnds := time.Now().Add(antigravityCarbonThoughtWindow)
 		body := &antigravityIdleStream{ReadCloser: resp.Body}
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(nil, streamScannerBuffer)
@@ -280,7 +281,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var pendingFilterMsg string
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		protocolDone := false
-		for scanner.Scan() {
+		for {
+			if body.timeout > 0 {
+				body.timeout = antigravityCarbonReadBudget(idleTimeout,
+					len(pendingFilterPayload) == 0 && progress.ThinkingOnly(), time.Until(thoughtWindowEnds))
+			}
+			if !scanner.Scan() {
+				break
+			}
 			line := scanner.Bytes()
 			// The explicit SSE terminator ends a turn independently of the HTTP socket.
 			frame := bytes.TrimSpace(line)

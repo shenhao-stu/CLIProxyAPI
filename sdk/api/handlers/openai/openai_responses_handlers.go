@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -78,6 +80,7 @@ type responsesSSEFramer struct {
 	dataFrames           int
 	writeErr             error
 	canComplete          func() bool
+	keepAliveInterval    *time.Duration
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -1125,6 +1128,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		failureEvent = "response.failed"
 	}
 	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+	if baseModel, ultra := strings.CutPrefix(modelName, "ultra/"); ultra && util.IsGeminiCarbon(baseModel) {
+		interval := 15 * time.Second
+		framer.keepAliveInterval = &interval
+	}
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.
@@ -1506,6 +1513,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	}
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		KeepAliveInterval:      framer.keepAliveInterval,
 		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
 		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
 		WriteChunk: func(chunk []byte) {

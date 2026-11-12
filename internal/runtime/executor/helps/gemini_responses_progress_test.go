@@ -109,6 +109,29 @@ func TestGeminiResponsesProgressScopeAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestGeminiResponsesThinkingOnlyEndsOnDeliverableOrTerminal(t *testing.T) {
+	for _, final := range []string{
+		`{"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool"}}]}}]}`,
+		`{"candidates":[{"finishReason":"STOP"}]}`,
+		`{"error":{"code":500}}`,
+	} {
+		p := startedGeminiProgress(t)
+		p.Forward([]byte(": transport keepalive"), nil)
+		if p.ThinkingOnly() {
+			t.Fatal("transport heartbeat extended the read budget")
+		}
+		p.Forward([]byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"reasoning"}]}}]}`), nil)
+		if !p.ThinkingOnly() {
+			t.Fatal("a native reasoning frame should qualify for the extended wait")
+		}
+		p.Forward([]byte(final), nil)
+		if p.ThinkingOnly() {
+			t.Fatalf("extended wait was retained after %s", final)
+		}
+	}
+}
+
 func TestGeminiResponsesProgressDoesNotMultiplyOrInventData(t *testing.T) {
 	p := startedGeminiProgress(t)
 	usage := []byte(`{"usageMetadata":{"thoughtsTokenCount":3}}`)

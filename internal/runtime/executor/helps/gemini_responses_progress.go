@@ -35,6 +35,12 @@ func NewGeminiResponsesProgress(model string, format sdktranslator.Format) Gemin
 	return GeminiResponsesProgress{enabled: format == sdktranslator.FormatOpenAIResponse && strings.HasPrefix(strings.ToLower(model), "gemini-")}
 }
 
+// ThinkingOnly requires a native thought and ends at the first deliverable output.
+func (p *GeminiResponsesProgress) ThinkingOnly() bool {
+	return p.enabled && p.nativeThought && !p.nativeText && !p.nativeTool && !p.nativeOther &&
+		!p.sourceFinished && !p.terminal && !p.promptBlocked
+}
+
 func (p *GeminiResponsesProgress) Forward(raw []byte, chunks [][]byte) [][]byte {
 	if !p.enabled || p.terminal {
 		return chunks

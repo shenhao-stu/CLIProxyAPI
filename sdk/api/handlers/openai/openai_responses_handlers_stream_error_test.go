@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -452,6 +453,33 @@ func TestResponsesHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) {
 			t.Fatalf("request %d lost the initial upstream error: status=%d body=%q", i, recorder.Code, recorder.Body.String())
 		}
 	}
+}
+
+func TestForwardResponsesStreamKeepaliveAcrossCarbonReasoningGap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+		h := NewOpenAIResponsesAPIHandler(base)
+		data := make(chan []byte)
+		interval := 15 * time.Second
+		go func() {
+			defer close(data)
+			time.Sleep(358 * time.Second)
+			data <- []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n\n")
+		}()
+		var err error
+		h.forwardResponsesStream(c, c.Writer, func(e error) { err = e }, data, nil, &responsesSSEFramer{
+			keepAliveInterval: &interval,
+			canComplete:       func() bool { return true },
+		})
+		body := rec.Body.String()
+		if err != nil || strings.Count(body, ": keep-alive\n\n") != 23 ||
+			strings.Count(body, "event: response.completed") != 1 {
+			t.Fatalf("transport heartbeat or completion was lost: %v, %q", err, body)
+		}
+	})
 }
 
 // TestForwardResponsesStreamExposesTerminalErrors pins the SSE side: once a
