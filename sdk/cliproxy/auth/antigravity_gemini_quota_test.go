@@ -78,6 +78,55 @@ func TestAntigravityGeminiSharedQuotaKeepsStrongerBlocks(t *testing.T) {
 	}
 }
 
+func TestAntigravityGeminiQuotaSurvivesFileStoreRestore(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	original := sharedGeminiQuotaFixture(now)
+	original.Prefix = "ultra"
+	original.Status = StatusError
+	original.LastError = original.ModelStates["gemini-3.8-flash-high"].LastError
+	updateAggregatedAvailability(original, now)
+	store := NewFileCooldownStateStore(t.TempDir())
+	writer := NewManager(nil, nil, nil)
+	if _, errRegister := writer.Register(WithSkipPersist(ctx), original); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	writer.SetCooldownStateStore(store)
+	writer.PersistCooldownStates(ctx)
+	if records, errLoad := store.Load(ctx); errLoad != nil || len(records) != 2 {
+		t.Fatalf("expected model and aggregate records, got %d: %v", len(records), errLoad)
+	}
+
+	// A new process starts with only the credential metadata, not runtime state.
+	restored := NewManager(nil, nil, nil)
+	if _, errRegister := restored.Register(WithSkipPersist(ctx), &Auth{
+		ID: original.ID, Provider: original.Provider, Prefix: original.Prefix, Status: StatusActive,
+	}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	restored.SetCooldownStateStore(store)
+	if errRestore := restored.RestoreCooldownStates(ctx); errRestore != nil {
+		t.Fatal(errRestore)
+	}
+	auth, ok := restored.GetByID(original.ID)
+	if !ok {
+		t.Fatal("credential missing after restore")
+	}
+	until := now.Add(time.Hour)
+	for _, model := range []string{"ultra/gemini-4-argon-high", "ultra/gemini-4-hydrogen-xhigh"} {
+		blocked, _, deadline := isAuthBlockedForModel(auth, model, now)
+		if !blocked || !deadline.Equal(until) {
+			t.Fatalf("restored Gemini quota lost: model=%s blocked=%v deadline=%v", model, blocked, deadline)
+		}
+		if blocked, _, _ := isAuthBlockedForModel(auth, model, until.Add(time.Second)); blocked {
+			t.Fatalf("expired quota still blocks %s", model)
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, "ultra/claude-sonnet-5-5-high", now); blocked {
+		t.Fatal("persisted Gemini cooldown affected Claude")
+	}
+}
+
 func TestAntigravityGeminiQuotaRefreshesWarmScheduler(t *testing.T) {
 	for _, prefix := range []string{"", "ultra/"} {
 		t.Run(prefix, func(t *testing.T) { checkGeminiWarmScheduler(t, prefix) })
