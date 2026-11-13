@@ -406,6 +406,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		return [][]byte{}
 	}
 	done := bytes.Equal(rawJSON, []byte("[DONE]"))
+	inferredFinish := done && st.FinishReason == ""
 	if done {
 		if !st.Started || st.ActiveStreamingFunc != nil || st.HasFailedStreamingFunc {
 			return [][]byte{}
@@ -1819,7 +1820,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		if st.Usage.Present {
 			_ = completedDoc.SetRawBytes("response.usage", st.Usage.ResponsesJSON())
 		}
-		if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs) {
+		if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs, !inferredFinish) {
 			eventType, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
 			_ = completedDoc.Set("type", eventType)
 			_ = completedDoc.Set("response.status", status)
@@ -2347,7 +2348,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	if usage.Merge(root, true) {
 		_ = respDoc.SetRawBytes("usage", usage.ResponsesJSON())
 	}
-	if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs) {
+	if status == "completed" && !geminiResponsesHasDeliverableOutput(outputs, true) {
 		_, status, _, terminalError = geminiResponsesTerminalState("EMPTY_COMPLETION")
 		_ = respDoc.Set("status", status)
 		_ = respDoc.SetRawBytes("error", terminalError)
@@ -2356,8 +2357,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	return respDoc.Bytes()
 }
 
-// Opaque replay signatures preserve context; they do not constitute an answer.
-func geminiResponsesHasDeliverableOutput(outputs [][]byte) bool {
+// At EOF without a source finish, reasoning alone cannot prove an answer.
+func geminiResponsesHasDeliverableOutput(outputs [][]byte, allowReasoning bool) bool {
 	for _, raw := range outputs {
 		item := ojson.ParseBytes(raw)
 		switch item.Get("type").String() {
@@ -2368,6 +2369,9 @@ func geminiResponsesHasDeliverableOutput(outputs [][]byte) bool {
 				}
 			}
 		case "reasoning":
+			if !allowReasoning {
+				continue
+			}
 			for _, part := range item.Get("summary").Array() {
 				if strings.TrimSpace(part.Get("text").String()) != "" {
 					return true

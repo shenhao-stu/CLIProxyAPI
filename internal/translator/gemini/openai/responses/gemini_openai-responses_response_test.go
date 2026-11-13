@@ -1049,7 +1049,7 @@ func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactl
 
 	var deltas []string
 	outputDoneCount := 0
-	completedCount := 0
+	failedCount := 0
 	for _, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		switch event {
@@ -1057,12 +1057,15 @@ func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactl
 			deltas = append(deltas, data.Get("delta").String())
 		case "response.output_item.done":
 			outputDoneCount++
-		case "response.completed":
-			completedCount++
+		case "response.failed":
+			if data.Get("response.error.code").String() != "upstream_empty_completion" {
+				t.Fatalf("unexpected terminal error: %s", data.Raw)
+			}
+			failedCount++
 		}
 	}
-	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || completedCount != 1 {
-		t.Fatalf("DONE finalization malformed: deltas=%q output_done=%d completed=%d", deltas, outputDoneCount, completedCount)
+	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || failedCount != 1 {
+		t.Fatalf("DONE finalization malformed: deltas=%q output_done=%d failed=%d", deltas, outputDoneCount, failedCount)
 	}
 	if duplicate := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param); len(duplicate) != 0 {
 		t.Fatalf("duplicate DONE emitted %d events", len(duplicate))
