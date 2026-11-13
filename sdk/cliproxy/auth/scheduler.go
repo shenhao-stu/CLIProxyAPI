@@ -1051,6 +1051,16 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	if auth == nil {
 		return
 	}
+	// Refresh sibling shards on Gemini quota changes without converting the
+	// persisted model cooldown into a credential-wide (Claude-blocking) one.
+	if auth.Provider == "antigravity" {
+		for _, model := range targetModels {
+			if isAntigravityGeminiModel(auth, model) {
+				credentialScoped = true
+				break
+			}
+		}
+	}
 	authID := strings.TrimSpace(auth.ID)
 	if authID == "" {
 		return
