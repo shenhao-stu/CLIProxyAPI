@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -17,6 +19,7 @@ import (
 type GeminiResponsesProgress struct {
 	enabled, started, terminal bool
 	sourceFinished             bool
+	carbon, completeLastMeter  bool
 	nativeText, nativeThought  bool
 	nativeTool, nativeOther    bool
 	nativeFinish               string
@@ -32,7 +35,16 @@ type GeminiResponsesProgress struct {
 }
 
 func NewGeminiResponsesProgress(model string, format sdktranslator.Format) GeminiResponsesProgress {
-	return GeminiResponsesProgress{enabled: format == sdktranslator.FormatOpenAIResponse && strings.HasPrefix(strings.ToLower(model), "gemini-")}
+	enabled := format == sdktranslator.FormatOpenAIResponse && strings.HasPrefix(strings.ToLower(model), "gemini-")
+	return GeminiResponsesProgress{enabled: enabled, carbon: enabled && util.IsGeminiCarbon(model)}
+}
+
+// A clean transport close is ambiguous in a text turn. A real finish or a
+// complete meter in the last native frame still permits normal completion.
+// Tool and other structured outputs retain their own completion checks.
+func (p *GeminiResponsesProgress) CarbonTextTruncated() bool {
+	return p.carbon && p.nativeText && !p.nativeTool && !p.nativeOther &&
+		!p.sourceFinished && !p.terminal && !p.completeLastMeter
 }
 
 // ThinkingOnly requires a native thought and ends at the first deliverable output.
@@ -87,6 +99,11 @@ func (p *GeminiResponsesProgress) observe(raw []byte) bool {
 		return false
 	}
 	p.nativeFrames++
+	if p.carbon {
+		var meter translatorcommon.GeminiUsageSnapshot
+		meter.Merge(root, true)
+		p.completeLastMeter = meter.Complete && meter.Candidates > 0
+	}
 	p.promptBlocked = p.promptBlocked || root.Get("promptFeedback.blockReason").Exists()
 	if errFrame := root.Get("error"); errFrame.Exists() {
 		p.nativeErrorStatus = int(errFrame.Get("code").Int())

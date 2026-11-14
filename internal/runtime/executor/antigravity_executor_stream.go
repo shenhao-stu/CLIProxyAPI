@@ -515,6 +515,20 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			case <-ctx.Done():
 			}
 		} else if ctx.Err() == nil {
+			if progress.CarbonTextTruncated() {
+				streamErr = statusErr{
+					code:            http.StatusBadGateway,
+					msg:             `{"error":{"type":"server_error","code":"upstream_stream_truncated","message":"The upstream stream ended before completion","status_code":502}}`,
+					streamTruncated: true,
+				}
+				stopDeliverySupport()
+				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			// Only a clean end of stream may produce a synthetic terminal event.
 			// Translating [DONE] after a read error would report a truncated
 			// stream as a successful completion. A clean EOF is a normal end
