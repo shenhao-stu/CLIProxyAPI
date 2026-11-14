@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -452,6 +453,33 @@ func TestResponsesHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) {
 			t.Fatalf("request %d lost the initial upstream error: status=%d body=%q", i, recorder.Code, recorder.Body.String())
 		}
 	}
+}
+
+func TestForwardResponsesStreamKeepaliveAcrossCarbonReasoningGap(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+		h := NewOpenAIResponsesAPIHandler(base)
+		data := make(chan []byte)
+		interval := 15 * time.Second
+		go func() {
+			defer close(data)
+			time.Sleep(358 * time.Second)
+			data <- []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n\n")
+		}()
+		var err error
+		h.forwardResponsesStream(c, c.Writer, func(e error) { err = e }, data, nil, &responsesSSEFramer{
+			keepAliveInterval: &interval,
+			canComplete:       func() bool { return true },
+		})
+		body := rec.Body.String()
+		if err != nil || strings.Count(body, ": keep-alive\n\n") != 23 ||
+			strings.Count(body, "event: response.completed") != 1 {
+			t.Fatalf("transport heartbeat or completion was lost: %v, %q", err, body)
+		}
+	})
 }
 
 // TestForwardResponsesStreamExposesTerminalErrors pins the SSE side: once a
@@ -900,6 +928,14 @@ type preFTKeepAliveResponsesExecutor struct {
 	chunks chan coreexecutor.StreamChunk
 }
 
+type preFTStatusError struct {
+	status int
+	msg    string
+}
+
+func (e preFTStatusError) Error() string   { return e.msg }
+func (e preFTStatusError) StatusCode() int { return e.status }
+
 func (*preFTKeepAliveResponsesExecutor) Identifier() string { return "pre-ft-keepalive-responses" }
 
 func (*preFTKeepAliveResponsesExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -1076,6 +1112,72 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 		}
 	})
 
+	t.Run("enabled maps Claude prompt is too long after keepalive to response.failed context_length_exceeded", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-keepalive-prompt-too-long-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-keepalive-prompt-too-long-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		go func() {
+			tickChan <- time.Unix(1, 0)
+			tickChan <- time.Unix(2, 0)
+			chunks <- coreexecutor.StreamChunk{
+				Err: preFTStatusError{
+					status: http.StatusBadRequest,
+					msg:    `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`,
+				},
+			}
+			close(chunks)
+		}()
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds:      10,
+				SendKeepAliveBeforeFT: true,
+			},
+		}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if !strings.Contains(body, ": keep-alive\n\n") {
+			t.Fatalf("initial keepalive missing: %q", body)
+		}
+		if !strings.Contains(body, "event: response.failed") {
+			t.Fatalf("missing response.failed event: %q", body)
+		}
+		if !strings.Contains(body, `"code":"context_length_exceeded"`) {
+			t.Fatalf("response.failed missing context_length_exceeded code: %q", body)
+		}
+		if !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "prompt is too long: 210000 tokens") {
+			t.Fatalf("response.failed missing prompt is too long detail: %q", body)
+		}
+	})
+
 	t.Run("disabled by default does not create pre-FT ticker even when keepalive-seconds > 0", func(t *testing.T) {
 		ch, stop := handlers.NewPreFirstTokenKeepAliveTicker(&sdkconfig.SDKConfig{
 			Streaming: sdkconfig.StreamingConfig{
@@ -1088,4 +1190,36 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 			t.Fatal("expected nil pre-FT keepalive channel when send-keepalive-before-ft is false")
 		}
 	})
+}
+
+func TestResponsesSSEPayloadErrorMessage_ImageGenerationUserErrorMapsToBadRequest(t *testing.T) {
+	payloads := [][]byte{
+		[]byte(`{"type":"response.failed","response":{"status":"failed","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}}`),
+		[]byte(`{"type":"error","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}`),
+	}
+	for _, payload := range payloads {
+		errMsg := responsesSSEPayloadErrorMessage(payload)
+		if errMsg == nil {
+			t.Fatalf("expected non-nil ErrorMessage for %s", payload)
+		}
+		if errMsg.StatusCode != http.StatusBadRequest {
+			t.Fatalf("StatusCode = %d, want %d for payload %s", errMsg.StatusCode, http.StatusBadRequest, payload)
+		}
+		if !strings.Contains(errMsg.Error.Error(), "/v1/images/generations") || !strings.Contains(errMsg.Error.Error(), "gpt-5.4-mini") {
+			t.Fatalf("expected remediation guidance in error message, got %q", errMsg.Error.Error())
+		}
+	}
+}
+
+func TestResponsesGeminiFilterCarriesExplicit400AfterHeaders(t *testing.T) {
+	filter := errors.New("This request was blocked by Gemini's filters. See https://policies.google.com/terms/generative-ai/use-policy.")
+	errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: filter}
+	safe := sanitizeResponsesStreamErrorMessage(errMsg)
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(safe.StatusCode, responsesStreamErrorText(safe, safe.StatusCode), 2)
+	body := string(chunk)
+	for _, want := range []string{`"status_code":400`, `"code":"gemini_content_filter"`, `"type":"invalid_request_error"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
 }

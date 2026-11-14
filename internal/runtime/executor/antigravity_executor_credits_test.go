@@ -299,6 +299,102 @@ func TestAntigravityExecute_DoesNotUseRequestRetryForInternalRetries(t *testing.
 	}
 }
 
+func TestAntigravityUltraUnspecified429CoolsOnlyTheRequestedModel(t *testing.T) {
+	const (
+		model = "gemini-4-argon-high"
+		other = "gemini-4-carbon-low"
+		id    = "ultra-unspecified-429"
+	)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted (e.g. check quota)."}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.RegisterExecutor(NewAntigravityExecutor(cfg))
+	registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: model}, {ID: other}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	ctx := context.Background()
+	_, err := manager.Register(ctx, &cliproxyauth.Auth{
+		ID: id, Provider: "antigravity", Prefix: "ultra",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata: map[string]any{
+			"access_token": "test-token",
+			"project_id":   "test-project",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := cliproxyexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}
+	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity}
+	for range 2 {
+		_, err := manager.ExecuteStream(ctx, []string{"antigravity"}, request, options)
+		var status interface{ StatusCode() int }
+		if !errors.As(err, &status) || status.StatusCode() != http.StatusTooManyRequests {
+			t.Fatalf("got %v, want 429", err)
+		}
+	}
+	snapshot, ok := manager.GetByID(id)
+	if !ok {
+		t.Fatal("auth was removed")
+	}
+	state := snapshot.ModelStates[model]
+	if state == nil || time.Until(state.NextRetryAfter) < 25*time.Second {
+		t.Fatalf("cooldown is shorter than the client retry burst: %+v", state)
+	}
+	if snapshot.Disabled || snapshot.Quota.Reason == "credential_quota" || snapshot.ModelStates[other] != nil {
+		t.Fatal("model-specific 429 changed credential or sibling availability")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("upstream attempts = %d, want 1", got)
+	}
+}
+
+func TestAntigravityUltraUnspecified429KeepsExplicitRetryPolicy(t *testing.T) {
+	const generic = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted (e.g. check quota)."}}`
+	const explicit = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"100s"}]}}`
+	for _, tc := range []struct {
+		name, prefix, model, body, retryHeader string
+		coolingDisabled                        bool
+		wantDelay                              time.Duration
+		wantHint                               bool
+	}{
+		{"provider header", "ultra", "gemini-4-argon-high", generic, "90", false, 90 * time.Second, true},
+		{"explicit zero header", "ultra", "gemini-4-argon-high", generic, "0", false, 0, true},
+		{"provider reset", "ultra", "gemini-4-argon-high", explicit, "90", false, 100 * time.Second, true},
+		{"ordinary Gemini", "", "gemini-4-argon-high", generic, "", false, 0, false},
+		{"Ultra Claude", "ultra", "claude-sonnet-5-5-high", generic, "", false, 0, false},
+		{"cooldown disabled", "ultra", "gemini-4-argon-high", generic, "", true, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := NewAntigravityExecutor(&config.Config{DisableCooling: tc.coolingDisabled})
+			headers := http.Header{}
+			if tc.retryHeader != "" {
+				headers.Set("Retry-After", tc.retryHeader)
+			}
+			err := executor.newStatusErr(&cliproxyauth.Auth{Prefix: tc.prefix}, tc.model, http.StatusTooManyRequests, headers, []byte(tc.body))
+			if err.StatusCode() != http.StatusTooManyRequests || err.Error() != tc.body {
+				t.Fatalf("upstream error changed: %v", err)
+			}
+			hint := err.RetryAfter()
+			if (hint != nil) != tc.wantHint || (hint != nil && *hint != tc.wantDelay) {
+				t.Fatalf("RetryAfter = %v, want hint=%t delay=%s", hint, tc.wantHint, tc.wantDelay)
+			}
+		})
+	}
+}
+
 func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
