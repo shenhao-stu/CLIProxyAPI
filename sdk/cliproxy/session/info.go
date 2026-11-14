@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // SessionInfo encapsulates incoming request details needed for session affinity and upstream reporting.
@@ -36,19 +36,19 @@ type SessionTreeInfo = SessionInfo
 // sessionObject indexes top-level fields once so missing session keys do not
 // rescan large message arrays for every candidate path.
 type sessionObject struct {
-	result     gjson.Result
-	fields     map[string]gjson.Result
+	result     ojson.Result
+	fields     map[string]ojson.Result
 	duplicates map[string]bool
 }
 
-func newSessionObject(result gjson.Result) sessionObject {
+func newSessionObject(result ojson.Result) sessionObject {
 	object := sessionObject{result: result}
-	if result.Type != gjson.JSON {
+	if result.Type != ojson.JSON {
 		return object
 	}
-	result.ForEach(func(key, value gjson.Result) bool {
+	result.ForEach(func(key, value ojson.Result) bool {
 		if object.fields == nil {
-			object.fields = make(map[string]gjson.Result)
+			object.fields = make(map[string]ojson.Result)
 		}
 		if _, exists := object.fields[key.Str]; exists {
 			if object.duplicates == nil {
@@ -67,7 +67,7 @@ func (object sessionObject) Exists() bool {
 	return object.result.Exists()
 }
 
-func (object sessionObject) Get(path string) gjson.Result {
+func (object sessionObject) Get(path string) ojson.Result {
 	key, remaining, nested := strings.Cut(path, ".")
 	if nested && object.duplicates[key] {
 		return object.result.Get(path)
@@ -86,13 +86,13 @@ func (object sessionObject) Get(path string) gjson.Result {
 //  3. Session-Id / Session_id (Codex and compatible clients)
 //  4. X-Http-Session-Id (Antigravity CLI)
 //  5. X-Session-ID / X-Session-Affinity / X-Slot-Session-Id
-//  6. X-Conversation-Id / X-Thread-Id / X-Client-Request-Id
+//  6. X-Conversation-Id / X-Thread-Id
 //  7. Gemini cachedContent
 //  8. OpenAI thread_id
 //  9. session_id / sessionId
 //  10. prompt_cache_key (pck:), conversation.id (conv:), metadata.user_id (user:)
 //  11. conversation_id / chat_id
-//  12. execution_session_id metadata
+//  12. X-Client-Request-Id fallback, then execution_session_id metadata
 func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	var info SessionInfo
 	if metadata != nil {
@@ -298,9 +298,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			break
 		}
 	}
-	var codexTurnMetaJSON gjson.Result
+	var codexTurnMetaJSON ojson.Result
 	if codexTurnMeta != "" {
-		codexTurnMetaJSON = gjson.Parse(codexTurnMeta)
+		codexTurnMetaJSON = ojson.Parse(codexTurnMeta)
 	}
 
 	if sid == "" && codexTurnMetaJSON.Exists() {
@@ -621,27 +621,6 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 		return finalizeSessionInfo(info)
 	}
-	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
-		info.ClientType = "generic"
-		info.SessionID = "clientreq:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "clientreq:" + parentSID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "clientreq:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
-	}
 
 	// 6. Payload inspection
 	if len(payload) > 0 && root.Exists() {
@@ -788,7 +767,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 		if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
 			conversationID = "conv:" + sid
-		} else if conversation.Type == gjson.String {
+		} else if conversation.Type == ojson.String {
 			if sid := normalizedSessionCandidate(conversation.String()); sid != "" {
 				conversationID = "conv:" + sid
 			}
@@ -856,6 +835,29 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				return finalizeSessionInfo(info)
 			}
 		}
+	}
+
+	// A per-request correlation ID must not override a stable body session.
+	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
+		info.ClientType = "generic"
+		info.SessionID = "clientreq:" + sid
+		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
+		}
+		if parentSID != "" && parentSID != sid {
+			info.ParentSessionID = "clientreq:" + parentSID
+			info.AgentName = "subagent"
+		} else if parentCandidate != "" && parentCandidate != sid {
+			info.ParentSessionID = "clientreq:" + parentCandidate
+			info.AgentName = "subagent"
+		} else {
+			info.AgentName = "main"
+		}
+		return finalizeSessionInfo(info)
 	}
 
 	// 7. ExecutionSessionMetadataKey
@@ -947,16 +949,21 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	if info.SessionID == "" {
 		return SessionInfo{}, false
 	}
-	info.SessionID = BoundSessionIdentity(info.SessionID)
+	info.SessionID = strings.Clone(BoundSessionIdentity(info.SessionID))
 	if info.ParentSessionID != "" {
-		info.ParentSessionID = BoundSessionIdentity(info.ParentSessionID)
+		info.ParentSessionID = strings.Clone(BoundSessionIdentity(info.ParentSessionID))
 	}
 	if info.AgentName == "" {
 		info.AgentName = "main"
+	} else {
+		info.AgentName = strings.Clone(info.AgentName)
 	}
 	if info.ClientType == "" {
 		info.ClientType = "generic"
+	} else {
+		info.ClientType = strings.Clone(info.ClientType)
 	}
+	info.NodeKind = strings.Clone(info.NodeKind)
 	// Self-referential loop protection
 	if info.ParentSessionID == info.SessionID {
 		info.ParentSessionID = ""

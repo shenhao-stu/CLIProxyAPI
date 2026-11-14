@@ -58,6 +58,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 			} else {
 				requestID = generatedID
 				SetGinRequestID(c, requestID)
+				c.Header("X-CPA-Request-ID", requestID)
 				ctx := WithRequestID(c.Request.Context(), requestID)
 				c.Request = c.Request.WithContext(ctx)
 			}

@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -63,6 +64,7 @@ func (s *Service) Run(ctx context.Context) error {
 		forceHomeRuntimeConfig(s.cfg)
 		cfg = s.cfg
 		s.cfgMu.Unlock()
+		s.applyKVStoreConfig(cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
@@ -78,6 +80,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
 		}
+		s.applyKVStoreConfig(cfg)
 	}
 
 	s.applyRetryConfig(cfg)
@@ -259,6 +262,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
+		defer func() { s.shutdownErr = shutdownErr }()
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -368,8 +372,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+				// Active handlers may still publish final usage. Do not close its queue.
+				return
 			}
 		}
+
+		if errDrain := usage.StopDefaultAndWait(ctx); errDrain != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("usage dispatch drain incomplete: %w", errDrain))
+			log.Errorf("usage dispatch drain incomplete; plugins remain loaded: %v", errDrain)
+			return
+		}
+		log.Info("usage dispatcher drained before plugin shutdown")
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
@@ -389,9 +402,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		if errShutdownKV := s.shutdownKVStore(); errShutdownKV != nil {
+			log.Errorf("failed to stop local kv store: %v", errShutdownKV)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownKV
+			}
+		}
+
+		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
 	})
-	return shutdownErr
+	return s.shutdownErr
 }
 
 func (s *Service) ensureAuthDir() error {

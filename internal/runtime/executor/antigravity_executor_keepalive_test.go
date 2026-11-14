@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -200,7 +201,7 @@ func TestAntigravityCountTokensReusesUpstreamConnection(t *testing.T) {
 // path and verifies its whitelist does not reintroduce Connection: close.
 // It exercises both ways a downstream caller can request a close: the header,
 // which the whitelist strips, and Request.Close, which is a struct field that
-// req.WithContext copies verbatim and the header whitelist cannot reach.
+// req.Clone copies verbatim and the header whitelist cannot reach.
 func TestAntigravityHTTPRequestReusesUpstreamConnection(t *testing.T) {
 	var mu sync.Mutex
 	remotes := map[string]int{}
@@ -266,6 +267,96 @@ func TestAntigravityHTTPRequestReusesUpstreamConnection(t *testing.T) {
 	}
 	if distinct != 1 {
 		t.Fatalf("expected %d raw requests to reuse one upstream connection, got %d connections", requests, distinct)
+	}
+}
+
+func TestAntigravityHTTPRequestPreservesCallerRequest(t *testing.T) {
+	type contextKey struct{}
+	for _, tc := range []struct {
+		name         string
+		useCallerCtx bool
+		missingAuth  bool
+	}{
+		{name: "explicit execution context"},
+		{name: "caller context fallback", useCallerCtx: true},
+		{name: "authentication failure", missingAuth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent *http.Request
+			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				sent = req
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+			})
+			callerCtx := context.WithValue(context.Background(), contextKey{}, "caller")
+			callerCtx = context.WithValue(callerCtx, "cliproxy.roundtripper", transport)
+			executionCtx := context.WithValue(context.Background(), contextKey{}, "execution")
+			executionCtx = context.WithValue(executionCtx, "cliproxy.roundtripper", transport)
+			wantContextValue := "execution"
+			if tc.useCallerCtx {
+				executionCtx = nil
+				wantContextValue = "caller"
+			}
+			req, errRequest := http.NewRequestWithContext(callerCtx, http.MethodPost, "https://upstream.invalid", nil)
+			if errRequest != nil {
+				t.Fatal(errRequest)
+			}
+			req.Header = http.Header{
+				"Content-Type":        {"application/json"},
+				"Authorization":       {"Bearer caller-token"},
+				"Proxy-Authorization": {"Basic caller-proxy"},
+				"Cookie":              {"caller-session=private"},
+				"X-Session-Id":        {"caller-session"},
+				"Connection":          {"close"},
+				"User-Agent":          {"caller-agent"},
+			}
+			req.Close = true
+			req.Host = "caller-private.invalid"
+			req.Trailer = http.Header{"X-Caller-Private": {"caller-private"}}
+			originalHeaders := req.Header.Clone()
+			originalTrailers := req.Trailer.Clone()
+			auth := antigravityAuthWithIDAndProxy("", "")
+			if tc.missingAuth {
+				auth = nil
+			}
+			resp, errDo := NewAntigravityExecutor(&config.Config{}).HttpRequest(executionCtx, auth, req)
+			if resp != nil {
+				if errClose := resp.Body.Close(); errClose != nil {
+					t.Fatal(errClose)
+				}
+			}
+			if (errDo != nil) != tc.missingAuth {
+				t.Fatalf("HttpRequest error = %v, missingAuth = %v", errDo, tc.missingAuth)
+			}
+			if !reflect.DeepEqual(req.Header, originalHeaders) || !req.Close || req.Context() != callerCtx {
+				t.Errorf("caller request changed: headers=%v close=%v context=%v", req.Header, req.Close, req.Context().Value(contextKey{}))
+			}
+			if req.Host != "caller-private.invalid" || !reflect.DeepEqual(req.Trailer, originalTrailers) {
+				t.Errorf("caller target/trailers changed: host=%q trailers=%v", req.Host, req.Trailer)
+			}
+			if tc.missingAuth {
+				if sent != nil {
+					t.Fatal("authentication failure reached upstream")
+				}
+				return
+			}
+			if sent == nil {
+				t.Fatal("upstream request was not sent")
+			}
+			wantHeaders := http.Header{
+				"Content-Type":  {"application/json"},
+				"Authorization": {"Bearer test-access-token"},
+				"User-Agent":    {resolveUserAgent(auth)},
+			}
+			if !reflect.DeepEqual(sent.Header, wantHeaders) || sent.Close {
+				t.Errorf("upstream header whitelist violated: headers=%v close=%v", sent.Header, sent.Close)
+			}
+			if sent.Host != "" || sent.Trailer != nil {
+				t.Errorf("caller target/trailers escaped: host=%q trailers=%v", sent.Host, sent.Trailer)
+			}
+			if value := sent.Context().Value(contextKey{}); value != wantContextValue {
+				t.Errorf("upstream context = %v, want %s", value, wantContextValue)
+			}
+		})
 	}
 }
 
