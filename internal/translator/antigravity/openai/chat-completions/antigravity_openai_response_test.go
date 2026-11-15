@@ -480,20 +480,19 @@ func TestConvertAntigravityResponseToOpenAIUsageMatchesNonStream(t *testing.T) {
 					if mode == "usage only" {
 						chunk = []byte(`{"response":{"usageMetadata":` + tc.metadata + `}}`)
 					} else if mode == "filtered until done" {
+						text := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"synthetic output"}]}}]}}`)
+						ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, text, &param)
 						chunk = []byte(`{"response":{"cpaUsageMetadata":` + tc.metadata + `}}`)
 					}
 					result := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk, &param)
-					if len(result) != 1 {
-						t.Fatalf("expected 1 result, got %d", len(result))
-					}
 					if mode == "filtered until done" {
-						if usage := ojson.GetBytes(result[0], "usage"); usage.Exists() {
-							t.Fatalf("filtered intermediate usage must remain pending: %s", usage.Raw)
+						if len(result) != 0 {
+							t.Fatalf("filtered intermediate usage must remain pending, got %d frames", len(result))
 						}
 						result = ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, []byte("[DONE]"), &param)
-						if len(result) != 1 {
-							t.Fatalf("expected 1 terminal result, got %d", len(result))
-						}
+					}
+					if len(result) != 1 {
+						t.Fatalf("expected 1 result, got %d", len(result))
 					}
 					for path, want := range map[string]int64{
 						"usage.prompt_tokens":                              tc.prompt,
@@ -584,4 +583,19 @@ func TestConvertAntigravityResponseToOpenAI_MultiPartThoughtAndTrailingSignature
 			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Hello world", out[0])
 		}
 	})
+}
+
+func TestConvertAntigravityResponseToOpenAI_SignatureOnlyEmptyTextDoesNotStartStreamOrEmitNullDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":378515,"cachedContentTokenCount":376466,"totalTokenCount":378515},"modelVersion":"gemini-4-hydrogen","responseId":"resp-7536"}}`)
+	out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, chunk, &param)
+	if len(out) != 0 {
+		t.Fatalf("signature-only empty-text chunk with filtered usage must not emit all-null delta, got %d chunk(s): %s", len(out), out[0])
+	}
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 0 {
+		t.Fatalf("signature-only empty-text stream must not synthesize stop on [DONE], got %d chunk(s): %s", len(done), done[0])
+	}
 }
